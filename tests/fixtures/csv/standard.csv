@@ -1,0 +1,5 @@
+Date,Country,Agency/PMD (af_prt),Media Source (pid),Campaign (c),Impressions,Clicks,CTR,Installs,Conversion Rate,Sessions,Loyal Users,Loyal Users/Installs,Total Revenue,Total Cost,ROI,ARPU,Average eCPI,af_purchase (Unique users),af_purchase (Event counter),af_purchase (Sales in USD)
+2026-09-01,US,,googleadwords_int,Campaign A,10000,500,5%,50,10%,200,20,40%,1000.5,200.25,400%,20.01,4.0025,15,18,300.75
+2026-09-01,DE,,Organic,None,,,,100,20%,150,10,10%,0,0,0%,0,0,,,
+2026-09-02,GB,agency_x,yandexdirect_int,Campaign B,5000,250,5%,25,10%,80,5,20%,150.0,N/A,N/A,6.0,N/A,3,4,45.0
+2026-09-02,US,,Facebook Ads,Campaign C,20000,1000,5%,100,10%,400,40,40%,2000.0,500.0,300%,20.0,5.0,30,35,600.0

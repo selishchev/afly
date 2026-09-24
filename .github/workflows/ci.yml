@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest -m "not integration" -q
+
+  lint:
+    name: Lint & type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dev tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Ruff
+        run: ruff check .
+
+      - name: Black
+        run: black --check .
+
+      - name: Mypy
+        run: mypy afly
+        continue-on-error: true  # mypy strict mode is aspirational; do not block PRs yet
+
+  integration:
+    name: Integration tests (Docker, ${{ matrix.ch_image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both the oldest server this project still targets and the actual
+        # warehouse version analysts connect to — run separately (rather than
+        # both in one job via AFLY_CH_IMAGES) so a failure names the image.
+        ch_image:
+          - "clickhouse/clickhouse-server:22.11"
+          - "clickhouse/clickhouse-server:26.3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package with dev + integration extras
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,integration]"
+
+      - name: Run integration tests (native + http, this image only)
+        env:
+          AFLY_CH_IMAGES: ${{ matrix.ch_image }}
+        run: pytest -m integration -q

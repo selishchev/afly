@@ -1,0 +1,2 @@
+Date,Country,Agency/PMD (af_prt),Media Source (pid),Campaign (c),Impressions,Clicks,CTR,Installs,Conversion Rate,Sessions,Loyal Users,Loyal Users/Installs,Total Revenue,Total Cost,ROI,ARPU,Average eCPI,af_purchase (Unique users),af_purchase (Event counter),af_purchase (Sales in EUR),af_subscribe (Unique users),af_subscribe (Event counter),af_subscribe (Sales in EUR)
+2026-09-01,DE,,googleadwords_int,Campaign A,8000,400,5%,40,10%,150,15,37.5%,900.0,180.0,500%,22.5,4.5,12,14,250.0,3,3,90.0
