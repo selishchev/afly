@@ -101,14 +101,23 @@ def process_job(
         record_call(job, api_calls, clock())
         return FetchOutcome(None, signal=DEFERRED, api_calls=api_calls, retry_after=exc.retry_after)
     except (PermanentError, EmptyBodyError, TransientError) as exc:
+        # The failed attempts were real HTTP calls: they count against the key's
+        # spacing and belong in _afly_loads, together with what AppsFlyer said.
+        api_calls = client.api_calls - start_calls
+        record_call(job, api_calls, clock())
+        detail = f"{exc} (status {exc.status})" if exc.status else str(exc)
+        if exc.body_excerpt:
+            detail += f": {exc.body_excerpt}"
         result = JobResult(
             job=job,
             status="failed",
-            error=str(exc)[:500],
+            error=detail[:500],
+            api_calls=api_calls,
+            http_status=exc.status,
             started_at=started_at,
             finished_at=now(),
         )
-        return FetchOutcome(result)
+        return FetchOutcome(result, api_calls=api_calls)
 
     record_call(job, raw.api_calls, clock())
 

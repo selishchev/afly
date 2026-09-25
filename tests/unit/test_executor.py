@@ -659,7 +659,9 @@ def test_lookahead_pair_rule_blocks_later_wave_until_earlier_chunk_terminal() ->
     )
     executor.run()
 
-    assert sleep.calls == [60.0]  # waited out job1's own deferral, not more
+    # 1st wait: job1's own deferral; 2nd: the key's spacing after job1's failed call —
+    # a failed request is a real AppsFlyer call and counts against the per-key limit.
+    assert sleep.calls == [60.0, 60.0]
     assert (_REPORT_TYPE, "app1", day2, day2) not in client.calls
 
     rows = [f for f in loads.finished if f.load.extract == "standard" and f.load.app_id == "app1"]
@@ -733,3 +735,27 @@ def test_unknown_header_warns_once(capsys: pytest.CaptureFixture[str]) -> None:
 
     err = capsys.readouterr().err
     assert err.count("unknown CSV header: Weirdo") == 1
+
+
+@pytest.mark.unit
+def test_failed_chunk_records_status_calls_and_appsflyer_message() -> None:
+    """A failed chunk's _afly_loads row must say what AppsFlyer answered: the
+    live backfill of 2026-09-24 recorded `http_status=None, api_calls=0` and a
+    bare "rejected (status 416)" for real failed calls, which hid the cause."""
+    day1 = date(2026, 1, 1)
+    job = _job("standard", "app1", day1, day1)
+
+    client = FakeAppsFlyer()
+    client.script(_REPORT_TYPE, "app1", day1, day1, (400, "Invalid date range"))
+
+    loads = FakeLoadsRepo()
+    executor, _summary = _executor(
+        [job], client=client, loads=loads, rebuilders={("marts", "t"): FakeRebuilder()}
+    )
+    executor.run()
+
+    [finished] = loads.finished
+    assert finished.status == "failed"
+    assert finished.http_status == 400
+    assert finished.api_calls == 1
+    assert "Invalid date range" in (finished.error or "")

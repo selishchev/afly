@@ -228,19 +228,38 @@ def test_fetch_report_401_raises_auth_error_immediately() -> None:
 
 
 @pytest.mark.unit
-def test_fetch_report_404_raises_permanent_error_no_retry() -> None:
+def test_fetch_report_400_raises_permanent_error_no_retry() -> None:
     client = AppsFlyerClient(token="t")
     spec = PullRequestSpec(report_type="geo_by_date_report")
     calls = {"n": 0}
     policy = RetryPolicy(sleep=lambda s: calls.__setitem__("n", calls["n"] + 1))
 
     with requests_mock.Mocker() as m:
-        m.get(_report_url(), status_code=404, text="unknown app")
+        m.get(_report_url(), status_code=400, text="bad date range")
         with pytest.raises(PermanentError):
             fetch_report(client, spec, "app1", _FROM, _TO, policy)
 
     assert calls["n"] == 0
     assert len(m.request_history) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("status", [404, 416])
+def test_fetch_report_spurious_404_416_is_retried_and_recovers(status: int) -> None:
+    # Live backfill 2026-09-24: single chunks came back 416/404 and succeeded later.
+    client = AppsFlyerClient(token="t")
+    spec = PullRequestSpec(report_type="geo_by_date_report")
+    policy = RetryPolicy(sleep=lambda s: None, max_retries=3)
+
+    with requests_mock.Mocker() as m:
+        m.get(
+            _report_url(),
+            [{"status_code": status, "text": "oops"}, {"status_code": 200, "text": "Date\n"}],
+        )
+        raw = fetch_report(client, spec, "app1", _FROM, _TO, policy)
+
+    assert raw.status == 200
+    assert raw.api_calls == 2
 
 
 @pytest.mark.unit

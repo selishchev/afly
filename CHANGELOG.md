@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-25
+
+### Fixed
+
+- AppsFlyer HTTP 404 / 408 / 416 / 425 are retried with the short transient backoff
+  instead of failing the chunk at once. A live 16-month backfill got single spurious
+  416/404 answers for apps that load fine on every neighbouring day; failing them
+  also skipped the rest of that app/extract's history for the run.
+- A failed chunk now records its HTTP status, the API calls it spent and AppsFlyer's
+  response text in `_afly_loads` (was `http_status = NULL`, `api_calls = 0`, no body).
+- A failed call now counts against the key's per-minute spacing, like a successful
+  or rate-limited one.
+
 ## [0.1.0] - 2026-09-24
 
 First public release.

@@ -8,7 +8,7 @@ import pytest
 import requests_mock
 
 from afly.appsflyer.client import AppsFlyerClient
-from afly.appsflyer.errors import AuthError, PermanentError
+from afly.appsflyer.errors import AuthError, PermanentError, TransientError
 from afly.appsflyer.mng_api import AppInfo, filter_apps, list_apps
 from afly.appsflyer.retry import RetryPolicy
 
@@ -114,14 +114,28 @@ def test_401_raises_auth_error() -> None:
 
 
 @pytest.mark.unit
-def test_404_raises_permanent_error() -> None:
+def test_404_is_retried_then_raises_transient_error() -> None:
+    # AppsFlyer returns spurious 404/416 for requests that succeed on retry.
+    client = AppsFlyerClient(token="t")
+    policy = RetryPolicy(sleep=lambda s: None, max_retries=3)
+
+    with requests_mock.Mocker() as m:
+        m.get(_APPS_URL, status_code=404, text="not found")
+        with pytest.raises(TransientError):
+            list_apps(client, policy)
+    assert len(m.request_history) == 3
+
+
+@pytest.mark.unit
+def test_400_raises_permanent_error() -> None:
     client = AppsFlyerClient(token="t")
     policy = RetryPolicy(sleep=lambda s: None)
 
     with requests_mock.Mocker() as m:
-        m.get(_APPS_URL, status_code=404, text="not found")
+        m.get(_APPS_URL, status_code=400, text="bad request")
         with pytest.raises(PermanentError):
             list_apps(client, policy)
+    assert len(m.request_history) == 1
 
 
 # --- filter_apps ---------------------------------------------------------

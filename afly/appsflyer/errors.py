@@ -14,6 +14,14 @@ from email.utils import parsedate_to_datetime
 
 _LIMIT_MARKER = "limit reached for"
 
+# 4xx statuses AppsFlyer returns spuriously for requests that succeed on a retry.
+# Observed on a live 18-app backfill (2026-09-24): single chunks of apps that load
+# fine on every neighbouring day came back 416 or 404, while the same app/report
+# returned data before and after. Treating them as permanent failed the chunk and,
+# through the pair invariant, skipped the rest of that app's history for the run.
+# A genuinely unknown app id still fails, only after the short transient backoff.
+_RETRYABLE_CLIENT_STATUSES = frozenset({404, 408, 416, 425})
+
 
 class AppsFlyerError(Exception):
     """Base for every error raised talking to the AppsFlyer API.
@@ -93,7 +101,7 @@ def classify_response(status: int, body: str, headers: object) -> type[AppsFlyer
         return RateLimitError if _LIMIT_MARKER in body.lower() else TransientError
     if status == 429:
         return RateLimitError
-    if 500 <= status < 600:
+    if 500 <= status < 600 or status in _RETRYABLE_CLIENT_STATUSES:
         return TransientError
     return PermanentError
 
