@@ -62,14 +62,94 @@ def test_mattermost_payload_shape() -> None:
     assert payload["username"] == "afly"
     assert payload["channel"] == "ops"
     assert payload["icon_emoji"] == ":rotating_light:"
-    assert payload["text"] == "@oncall"
+    assert payload["text"] == ""  # mentions moved into the attachment, see below
     attachment = payload["attachments"][0]
     assert attachment["title"] == "afly run failed"
-    assert attachment["text"] == "line one\nline two"
+    # mentions are the attachment's last line, separated by a blank line
+    assert attachment["text"] == "line one\nline two\n\n@oncall"
     assert attachment["color"] == "#D63232"
     assert "afly" in attachment["footer"]
     assert calls[0]["url"] == _SECRET_URL
     assert calls[0]["timeout"] == 10
+
+
+@pytest.mark.unit
+def test_mention_without_leading_at_is_normalized() -> None:
+    calls: list[dict[str, Any]] = []
+    channel = _channel(type="mattermost")
+
+    send_failure_alert(
+        channel,
+        project="demo",
+        profile="prod",
+        run_id="run-1",
+        title="t",
+        lines=["a"],
+        mentions=["oncall", "@already"],
+        post=_recording_post(calls),
+    )
+
+    attachment = calls[0]["json"]["attachments"][0]
+    assert attachment["text"] == "a\n\n@oncall @already"
+
+
+@pytest.mark.unit
+def test_run_url_appears_as_line_before_mentions() -> None:
+    calls: list[dict[str, Any]] = []
+    channel = _channel(type="mattermost", run_url="https://prefect.example/runs/flow-run/abc123")
+
+    send_failure_alert(
+        channel,
+        project="demo",
+        profile="prod",
+        run_id="run-1",
+        title="t",
+        lines=["a"],
+        mentions=["@oncall"],
+        post=_recording_post(calls),
+    )
+
+    attachment = calls[0]["json"]["attachments"][0]
+    assert attachment["text"] == "a\n\nhttps://prefect.example/runs/flow-run/abc123\n@oncall"
+
+
+@pytest.mark.unit
+def test_run_url_alone_with_no_mentions() -> None:
+    calls: list[dict[str, Any]] = []
+    channel = _channel(type="mattermost", run_url="https://prefect.example/runs/flow-run/abc123")
+
+    send_failure_alert(
+        channel,
+        project="demo",
+        profile="prod",
+        run_id="run-1",
+        title="t",
+        lines=["a"],
+        post=_recording_post(calls),
+    )
+
+    attachment = calls[0]["json"]["attachments"][0]
+    assert attachment["text"] == "a\n\nhttps://prefect.example/runs/flow-run/abc123"
+
+
+@pytest.mark.unit
+def test_run_url_omitted_when_empty_or_unresolved() -> None:
+    for run_url in ("", "${PREFECT_UI_BASE_URL}/runs/flow-run/${PREFECT__FLOW_RUN_ID}"):
+        calls: list[dict[str, Any]] = []
+        channel = _channel(type="mattermost", run_url=run_url)
+
+        send_failure_alert(
+            channel,
+            project="demo",
+            profile="prod",
+            run_id="run-1",
+            title="t",
+            lines=["a"],
+            post=_recording_post(calls),
+        )
+
+        attachment = calls[0]["json"]["attachments"][0]
+        assert attachment["text"] == "a"  # no run link, no mentions -> no trailing block
 
 
 @pytest.mark.unit
@@ -105,6 +185,7 @@ def test_webhook_type_is_plain_json() -> None:
         run_id="run-42",
         title="the title",
         lines=["l1", "l2"],
+        mentions=["@oncall"],
         post=_recording_post(calls),
     )
 
@@ -114,6 +195,8 @@ def test_webhook_type_is_plain_json() -> None:
         "text": "l1\nl2",
         "project": "demo",
         "run_id": "run-42",
+        "run_url": None,
+        "mentions": ["@oncall"],
     }
 
 

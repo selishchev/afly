@@ -40,6 +40,7 @@ sleeping in place — see that method's docstring for why.
 
 from __future__ import annotations
 
+import random
 import time
 from collections import deque
 from collections.abc import Callable
@@ -67,6 +68,7 @@ class QuotaScheduler:
         app_used: dict[str, int] | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        rand: Callable[[], float] = random.random,
         max_calls: int | None = None,
         max_minutes: int | None = None,
     ) -> None:
@@ -74,6 +76,7 @@ class QuotaScheduler:
         self.quota = quota
         self.clock = clock
         self.sleep = sleep
+        self.rand = rand
         self.max_calls = max_calls
         self.max_minutes = max_minutes
 
@@ -200,9 +203,12 @@ class QuotaScheduler:
 
         The delay escalates linearly per deferral of *this job*
         (``max(delay_seconds, quota.short_call_interval_seconds) *
-        deferral_count`` — 60s, 120s, 180s, ... at the defaults), mirroring
-        the old inline ``RetryPolicy`` backoff schedule so operators see the
-        same pacing, just non-blocking now.
+        deferral_count``, then jittered by ``quota.retry_jitter`` the same
+        way :class:`~afly.appsflyer.retry.RetryPolicy` jitters its own
+        waits — see that class's docstring), mirroring the old inline
+        ``RetryPolicy`` backoff schedule so operators see the same pacing,
+        just non-blocking now. Jitter only ever lengthens the wait, so it
+        never drops below the per-key spacing AppsFlyer itself expects.
 
         Gives up after ``quota.max_retries`` deferrals: the job is moved to
         ``skipped`` (reusing the same ``"quota: rate limited after N
@@ -226,7 +232,8 @@ class QuotaScheduler:
 
         count += 1
         self._deferral_counts[jid] = count
-        wait = max(delay_seconds or 0.0, self.quota.short_call_interval_seconds) * count
+        nominal = max(delay_seconds or 0.0, self.quota.short_call_interval_seconds) * count
+        wait = nominal * (1 + self.quota.retry_jitter * self.rand())
         ready_at = self.clock() + wait
         current = self._next_allowed.get(job.key, float("-inf"))
         self._next_allowed[job.key] = max(current, ready_at)

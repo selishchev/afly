@@ -40,6 +40,8 @@ defaults:
   keep_unknown_columns: false
   partition_granularity: month  # destination PARTITION BY toYYYYMM(date) — coarse partitions,
                                  # not hundreds of tiny daily parts a year; "day" to override
+  # exclude_apps: []        # app ids to drop from EVERY extract (unioned with each
+                              # extract's own exclude_apps:, e.g. a decommissioned test app)
 
 # quota:                              # AppsFlyer Pull API limits (defaults shown)
 #   short_call_interval_seconds: 65   # ranges <= 2 days: 1 call/min per app per report type
@@ -49,7 +51,12 @@ defaults:
 #   account_long_calls_per_day: 120
 #   app_long_calls_per_day: 24
 #   reserve_long_calls: 0
+#   min_gap_seconds: 0.5              # floor between ANY two AppsFlyer calls, any key
 #   max_retries: 5
+#   transient_base_wait_seconds: 30   # 5xx/network backoff: 30s, 60s, 120s, 240s, ... (doubling,
+#   transient_max_wait_seconds: 600   #   capped here) before max_retries gives up
+#   retry_jitter: 0.25                # +0-25% random spread on every retry/deferral wait, so
+#                                      #   sibling keys don't all retry at the same instant
 #   max_waves_in_flight: 8            # how many plan waves may be in flight at once — lets a
 #                                      # rate-limited job in one wave cool down without idling
 #                                      # every other key; 1 = old strict one-wave-at-a-time order
@@ -90,6 +97,9 @@ alert_channels:
   ops_mattermost:
     type: mattermost
     webhook_url: "{{ env_var('MATTERMOST_WEBHOOK_URL') }}"
+    # run_url: "${PREFECT_UI_BASE_URL}/runs/flow-run/${PREFECT__FLOW_RUN_ID}"
+    #                                            # link to this run in your orchestrator — omitted
+    #                                            # from the alert when unset (e.g. a laptop run)
 """
 
 _EXTRACT_STANDARD_YML = """name: standard

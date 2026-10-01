@@ -33,7 +33,8 @@ def run_apps(profile: str | None, platform: str | None, json_output: bool) -> in
         return 1
 
     client = _build_client(ctx)
-    policy = RetryPolicy(max_retries=ctx.project.quota.max_retries)
+    quota = ctx.project.quota
+    policy = RetryPolicy(max_retries=quota.max_retries, **quota.retry_policy_kwargs())
 
     try:
         apps = list_apps(client, policy)

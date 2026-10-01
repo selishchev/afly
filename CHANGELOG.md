@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-01
+
+### Added
+
+- `quota.transient_base_wait_seconds` (30), `quota.transient_max_wait_seconds` (600),
+  `quota.retry_jitter` (0.25) — configurable, longer, jittered retry/deferral
+  backoff for both `RetryPolicy` (transient errors) and `QuotaScheduler`
+  (rate-limit deferrals). Jitter (`actual = nominal * (1 + retry_jitter *
+  U)`) only ever lengthens a wait, so spacing never drops below AppsFlyer's
+  own per-minute throttle.
+- `defaults.exclude_apps` — a project-wide app-id exclusion list, UNIONed
+  (not overridden) into every extract's own `exclude_apps:`.
+- `alert_channels.<name>.run_url` — a link to the orchestrator's run (e.g. a
+  Prefect flow-run URL), shown as a line in the alert payload. Silently
+  omitted (no error, no warning) when empty or its env placeholders don't
+  resolve — a laptop run has no orchestrator.
+
+### Changed
+
+- **Retry waits are much longer by default.** The transient-error backoff
+  sequence is now 30s/60s/120s/240s (was 2s/4s/8s/16s/32s/60s-capped) before
+  `max_retries` (5) is exhausted — a persistently failing chunk can now take
+  ~7.5 minutes of inline sleeping, up from a few tens of seconds. Set
+  `quota.transient_base_wait_seconds`/`transient_max_wait_seconds` lower to
+  restore the old pacing if this doesn't suit your account.
+- **The failure alert now fires on every exit-1 outcome that happens after
+  the project loaded**, not only failed-chunk/abort/ClickHouse runs: an
+  extract-config load error, an empty selector match, an AppsFlyer error
+  resolving app lists, a held destination-table lock, and a schema mismatch
+  now alert too (still exactly once per run, still never on `--dry-run` or
+  an exit-0 run). A run that fails before the project/profiles config even
+  loads still can't alert — there's nothing to alert *through* yet.
+- **Mentions moved from the top-level Mattermost/Slack `text` into the
+  attachment**, as its last line, with the run link (when resolved) on the
+  line just above it; the top-level `text` is now always empty. A mention
+  written without a leading `@` is normalized to exactly one. The generic
+  `webhook` JSON payload gained `run_url` and `mentions` fields.
+- `QuotaConfig.max_waves_in_flight`'s docstring and the shipped docs now
+  correctly describe its default as `8` (code default was already `8`;
+  several docs still said `2`, a stale leftover from before it was raised).
+
+### Fixed
+
+- `docs/reference/cli.md`'s `--json` example was still `schema_version: 1`
+  (`days_rebuilt[].day`); replaced with the real `schema_version: 2` shape
+  (`partition` + `days`).
+- README/installation docs said "tested against 22.11"; the CI matrix (and
+  `CLAUDE.md`) also run ClickHouse 26.3 — both are now named everywhere.
+- The `afly init` skeleton's commented `# quota:` block was missing
+  `min_gap_seconds` and the three new retry fields; it and the commented
+  `defaults.exclude_apps:`/`alert_channels.*.run_url:` examples are now
+  included (commented, same as the rest of that block).
+
 ## [0.1.1] - 2026-09-25
 
 ### Fixed

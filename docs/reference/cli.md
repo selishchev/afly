@@ -63,11 +63,11 @@ afly run --select SEL [--exclude SEL] [--from DATE] [--to DATE] \
 | `1` | Any chunk failed, a config/DB error occurred, a lock is held by another run, or the selector matched no enabled extract. |
 | `2` | Usage error (bad CLI arguments). |
 
-### `--json` output (`schema_version: 1`)
+### `--json` output (`schema_version: 2`)
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "command": "run",
   "project": "my_project", "profile": "prod", "run_id": "20260922T101530Z-a1b2c3",
   "selector": "*", "exclude": null,
@@ -88,8 +88,8 @@ afly run --select SEL [--exclude SEL] [--from DATE] [--to DATE] \
      "error": null, "skip_reason": null}
   ],
   "days_rebuilt": [
-    {"table": "appsflyer.appsflyer_geo_by_date", "day": "2026-09-19",
-     "action": "replace", "kept_rows": 0, "fresh_rows": 120}
+    {"table": "appsflyer.appsflyer_geo_by_date", "partition": "202609",
+     "days": ["2026-09-19"], "action": "replace", "kept_rows": 0, "fresh_rows": 120}
   ],
   "quota": {"account_long_used": 0, "account_long_budget": 120, "per_app": {}},
   "totals": {"chunks": 33, "succeeded": 33, "failed": 0, "skipped": 0,
@@ -102,6 +102,13 @@ afly run --select SEL [--exclude SEL] [--from DATE] [--to DATE] \
 `null` unless the run stopped early — `"auth"` (401, or an unresolved 403)
 or `"clickhouse"` (a partition-rebuild failure); everything unprocessed at
 that point is recorded `skipped` with the abort reason.
+
+`days_rebuilt` is keyed by **partition**, not day (`schema_version` went
+1 → 2 when `partition_granularity` became configurable): under the default
+`partition_granularity: month` one entry can cover every day of a calendar
+month a wave touched, not just one — `"days"` lists only *that wave's own*
+days (a month partition can be rebuilt by several waves across one run).
+`totals.days_rebuilt` counts partition-rebuilds, not days.
 
 ## `afly ls`
 

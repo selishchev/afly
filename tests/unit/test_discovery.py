@@ -46,3 +46,25 @@ def test_load_extracts_allows_explicit_agreement_across_extracts(project_dir: Pa
     loaded = load_extracts(project_dir, project)
 
     assert {e.config.partition_granularity for e in loaded} == {"day"}
+
+
+@pytest.mark.unit
+def test_load_extracts_unions_project_exclude_apps_into_every_extract(project_dir: Path) -> None:
+    """`defaults.exclude_apps` (project-wide) is UNIONED into each extract's
+    own `exclude_apps:`, not overridden by it — see
+    ExtractConfig.with_defaults."""
+    project_yml = project_dir / "afly_project.yml"
+    project_yml.write_text(
+        project_yml.read_text().replace("defaults:\n", "defaults:\n  exclude_apps: ['999']\n", 1)
+    )
+    facebook_yml = project_dir / "extracts" / "facebook.yml"
+    facebook_yml.write_text(facebook_yml.read_text() + "\nexclude_apps: ['111']\n")
+
+    project = ProjectConfig.from_yaml_file(project_yml)
+    loaded = load_extracts(project_dir, project)
+
+    by_name = {e.config.name: e.config for e in loaded}
+    assert by_name["facebook"].exclude_apps == ["111", "999"]
+    # standard/yandex never set their own exclude_apps -> just the project one.
+    assert by_name["standard"].exclude_apps == ["999"]
+    assert by_name["yandex"].exclude_apps == ["999"]

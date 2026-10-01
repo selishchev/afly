@@ -10,7 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from afly.config import ConfigError
-from afly.config.project_config import ProjectConfig
+from afly.config.project_config import ExtractDefaults, ProjectConfig, QuotaConfig
 
 
 @pytest.mark.unit
@@ -106,6 +106,49 @@ def test_from_yaml_file_empty_raises_config_error(tmp_path: Path) -> None:
     path.write_text("")
     with pytest.raises(ConfigError, match="empty"):
         ProjectConfig.from_yaml_file(path)
+
+
+@pytest.mark.unit
+def test_quota_config_retry_defaults() -> None:
+    quota = QuotaConfig()
+    assert quota.transient_base_wait_seconds == 30.0
+    assert quota.transient_max_wait_seconds == 600.0
+    assert quota.retry_jitter == 0.25
+    assert quota.max_waves_in_flight == 8
+
+
+@pytest.mark.unit
+def test_quota_config_retry_policy_kwargs_maps_the_three_fields() -> None:
+    quota = QuotaConfig(
+        transient_base_wait_seconds=10.0, transient_max_wait_seconds=100.0, retry_jitter=0.1
+    )
+    assert quota.retry_policy_kwargs() == {
+        "transient_base_wait": 10.0,
+        "transient_cap": 100.0,
+        "retry_jitter": 0.1,
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("transient_base_wait_seconds", -1.0),
+        ("transient_max_wait_seconds", -1.0),
+        ("retry_jitter", -0.01),
+        ("retry_jitter", 1.01),
+    ],
+)
+def test_quota_config_rejects_out_of_range_retry_fields(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        QuotaConfig(**{field: value})
+
+
+@pytest.mark.unit
+def test_extract_defaults_exclude_apps_defaults_empty_and_rejects_typo() -> None:
+    assert ExtractDefaults().exclude_apps == []
+    with pytest.raises(ValidationError):
+        ExtractDefaults.model_validate({"exclue_apps": ["x"]})  # typo'd key
 
 
 @pytest.mark.unit

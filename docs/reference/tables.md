@@ -60,6 +60,20 @@ every column both land and both count (see
 | `_run_id` | `String` | The `afly run` invocation that wrote this row. |
 | `_loaded_at` | `DateTime64(3, 'UTC')` | When this row was written. |
 
+## Staging table (`<table>__afly_staging`)
+
+A byte-for-byte schema copy of the destination table, named
+`<table>__afly_staging` (or `<db>__<table>__afly_staging` when
+`staging_database` differs from the destination's database — see
+[Config reference](config.md)), that `PartitionRebuilder` uses to stage a
+partition's new contents before the atomic `REPLACE`/`DROP PARTITION` swap
+(see [Idempotency guide](../guides/idempotency.md)). It is **(re)created at
+the start of every `afly run`** (dropped first, then recreated from the
+destination's current schema, so a stale copy from before an `ALTER TABLE
+... ADD COLUMN` can never desync) **and dropped again when the run ends** —
+so it is never visible between runs, and never holds data a reader could
+observe mid-swap.
+
 ## `_afly_loads` — the idempotency ledger
 
 Append-only: two rows per chunk-pull attempt (`running` at start,

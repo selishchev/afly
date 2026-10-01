@@ -36,7 +36,8 @@ Full detail + the ClickHouse 22.11 findings: `.claude/rules/architecture.md`.
   the destination partition on ClickHouse 22.11 (`architecture.md`).
 - Every internal datetime is naive UTC — never mix in an aware one.
 - Tests: `unit` (no network/DB, mocked layers) and `integration`
-  (`clickhouse-server:22.11` via testcontainers), marked per `pyproject.toml`.
+  (`clickhouse-server:22.11` and `:26.3` via testcontainers — the full suite
+  runs against both images), marked per `pyproject.toml`.
 
 ## Dev commands
 

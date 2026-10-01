@@ -38,9 +38,11 @@ For one `(table, partition_id)`, given the set of `(day, extract, app_id)`
 **coverage** triples this wave is authoritative for:
 
 1. `TRUNCATE` the destination's staging table (`<table>__afly_staging`,
-   created once per run as `CREATE TABLE ... AS <destination>` — always the
-   destination's *current* schema, so a stale staging table from before an
-   `ALTER TABLE ... ADD COLUMN` can never desync).
+   (re)created once at the **start** of the run as `CREATE TABLE ... AS
+   <destination>` — always the destination's *current* schema, so a stale
+   staging table from before an `ALTER TABLE ... ADD COLUMN` can never
+   desync — and `DROP`ped again at the **end** of the run, so it's never
+   visible between runs).
 2. `INSERT INTO staging SELECT * FROM destination WHERE <partition expr> =
    <partition_id> AND (date, _extract, app_id) NOT IN <coverage>` — every
    existing row of that partition **except** the `(day, extract, app_id)`

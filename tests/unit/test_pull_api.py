@@ -267,7 +267,7 @@ def test_fetch_report_403_with_marker_is_rate_limited_and_honours_retry_after() 
     client = AppsFlyerClient(token="t")
     spec = PullRequestSpec(report_type="geo_by_date_report")
     waits: list[float] = []
-    policy = RetryPolicy(sleep=waits.append, max_retries=3)
+    policy = RetryPolicy(sleep=waits.append, max_retries=3, retry_jitter=0.0)
 
     with requests_mock.Mocker() as m:
         m.get(
@@ -327,7 +327,9 @@ def test_fetch_report_5xx_is_transient_backoff() -> None:
     client = AppsFlyerClient(token="t")
     spec = PullRequestSpec(report_type="geo_by_date_report")
     waits: list[float] = []
-    policy = RetryPolicy(sleep=waits.append, max_retries=3, transient_base_wait=1.0)
+    policy = RetryPolicy(
+        sleep=waits.append, max_retries=3, transient_base_wait=1.0, retry_jitter=0.0
+    )
 
     with requests_mock.Mocker() as m:
         m.get(

@@ -75,7 +75,8 @@ def _cached_apps_lister(ctx: ProjectContext) -> Callable[[], list[AppInfo]]:
     def _list() -> list[AppInfo]:
         nonlocal cache
         if cache is None:
-            policy = RetryPolicy(max_retries=ctx.project.quota.max_retries)
+            quota = ctx.project.quota
+            policy = RetryPolicy(max_retries=quota.max_retries, **quota.retry_policy_kwargs())
             cache = list_apps(_build_client(ctx), policy)
         return cache
 
@@ -204,7 +205,8 @@ def _run_pull_check(
         return False, {"error": f"extract {extract_name!r} not found"}
 
     spec = PullRequestSpec.from_extract(loaded.config)
-    policy = RetryPolicy(max_retries=ctx.project.quota.max_retries)
+    quota = ctx.project.quota
+    policy = RetryPolicy(max_retries=quota.max_retries, **quota.retry_policy_kwargs())
 
     try:
         raw = fetch_report(_build_client(ctx), spec, app_id, from_date, to_date, policy)

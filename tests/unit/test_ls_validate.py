@@ -49,6 +49,24 @@ def test_ls_json_parses_and_has_three_entries(runner: CliRunner, project_dir: Pa
 
 
 @pytest.mark.unit
+def test_ls_shows_merged_exclude_apps(runner: CliRunner, project_dir: Path) -> None:
+    """`ls`'s human output shows the UNION of an extract's own exclude_apps
+    and the project-wide defaults.exclude_apps (ExtractConfig.with_defaults),
+    not just whichever one happens to be set on the extract itself."""
+    project_yml = project_dir / "afly_project.yml"
+    project_yml.write_text(
+        project_yml.read_text().replace("defaults:\n", "defaults:\n  exclude_apps: ['999']\n", 1)
+    )
+    facebook_yml = project_dir / "extracts" / "facebook.yml"
+    facebook_yml.write_text(facebook_yml.read_text() + "\nexclude_apps: ['111']\n")
+
+    result = _invoke_in(runner, project_dir, ["ls", "--select", "facebook"])
+
+    assert result.exit_code == 0
+    assert "exclude_apps: 111, 999" in result.output
+
+
+@pytest.mark.unit
 def test_ls_no_match_exits_1(runner: CliRunner, project_dir: Path) -> None:
     result = _invoke_in(runner, project_dir, ["ls", "--select", "nomatch"])
     assert result.exit_code == 1

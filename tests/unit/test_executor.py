@@ -88,6 +88,9 @@ def _executor(
         min_gap_seconds=0.0,
         max_retries=quota_max_retries if quota_max_retries is not None else max_retries,
         max_waves_in_flight=max_waves_in_flight,
+        # Deterministic: a default-jittered deferral wait would break the
+        # exact `sleep.calls == [...]` assertions elsewhere in this file.
+        retry_jitter=0.0,
     )
     scheduler = QuotaScheduler(jobs, quota, clock=clock, sleep=sleep)
     plan = Plan(extracts=[], jobs=jobs)
@@ -526,7 +529,9 @@ def test_lookahead_dispatches_next_wave_without_sleeping_on_a_deferred_job() -> 
     events: list[str] = []
     orig_get = client.get
 
-    def spy_get(path: str, params: dict[str, object] | None = None, accept: str = "application/json"):  # type: ignore[no-untyped-def]
+    def spy_get(
+        path: str, params: dict[str, object] | None = None, accept: str = "application/json"
+    ):  # type: ignore[no-untyped-def]
         app_id = path.split("/app/", 1)[1].split("/", 1)[0]
         events.append(f"fetch {app_id}")
         return orig_get(path, params=params, accept=accept)

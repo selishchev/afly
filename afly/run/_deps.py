@@ -10,6 +10,7 @@ without test-supplied overrides) does.
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -107,6 +108,10 @@ class RunDeps:
     today: Callable[[], date] = today_utc
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], None] = time.sleep
+    # Source of the retry/deferral jitter (afly.config.project_config.
+    # QuotaConfig.retry_jitter) — overridden by tests that need deterministic
+    # wait values, same as `sleep`/`clock` above.
+    rand: Callable[[], float] = random.random
     alert_sender: Callable[..., bool] = field(default=_default_alert_sender)
 
 

@@ -74,6 +74,31 @@ def test_with_defaults_extract_override_wins() -> None:
 
 
 @pytest.mark.unit
+def test_with_defaults_unions_exclude_apps_order_preserving_deduped() -> None:
+    extract = _extract(exclude_apps=["a", "b"])
+    defaults = ExtractDefaults(start_date=date(2026, 1, 1), exclude_apps=["b", "c"])
+
+    merged = extract.with_defaults(defaults)
+
+    # extract's own entries first, then the project's, "b" kept only once.
+    assert merged.exclude_apps == ["a", "b", "c"]
+
+
+@pytest.mark.unit
+def test_with_defaults_exclude_apps_is_additive_not_a_fallback() -> None:
+    """Unlike every other field, a project default here is UNIONED in even
+    though the extract already set its own (non-empty) value — see the
+    with_defaults docstring for why exclude_apps can't use the usual
+    "unset means None" fallback pattern."""
+    extract = _extract(exclude_apps=["a"])
+    defaults = ExtractDefaults(start_date=date(2026, 1, 1), exclude_apps=["z"])
+
+    merged = extract.with_defaults(defaults)
+
+    assert merged.exclude_apps == ["a", "z"]
+
+
+@pytest.mark.unit
 def test_with_defaults_missing_start_date_raises_config_error() -> None:
     extract = _extract()
     defaults = ExtractDefaults()  # start_date stays None

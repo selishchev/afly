@@ -15,7 +15,9 @@ from typing import Any
 
 import pytest
 
+from afly.appsflyer.errors import AppsFlyerError
 from afly.cli._project import ProjectError, load_context
+from afly.database.ddl import SchemaMismatchError
 from afly.database.locks import LockHeldError
 from afly.run.options import RunOptions
 from afly.run.runner import RunDeps, run_pipeline
@@ -223,6 +225,177 @@ def test_lock_held_returns_1(tmp_path: Path) -> None:
     assert rc == 1
     assert summary.status == "error"
     assert "otherhost:999" in (summary.error or "")
+
+
+@pytest.mark.unit
+def test_lock_held_alerts_when_enabled(tmp_path: Path) -> None:
+    root = _write_project(tmp_path, alerting_enabled=True)
+    options = _options()
+    summary = _summary(options)
+
+    held_error = LockHeldError(
+        "table:appsflyer.appsflyer_geo_by_date",
+        "otherhost:999",
+        "run-xyz",
+        datetime(2026, 1, 1),
+        999.0,
+    )
+    locks = FakeLocksRepo(held={"table:appsflyer.appsflyer_geo_by_date": held_error})
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root, client=FakeAppsFlyer(), loads=FakeLoadsRepo(), locks=locks, alert_calls=alert_calls
+    )
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 1
+    assert len(alert_calls) == 1
+    # The friendlier, operator-facing message is echoed, but the alert/
+    # summary.error still carry the raw exception text (see runner._fail).
+    assert "otherhost:999" in summary.error
+
+
+@pytest.mark.unit
+def test_schema_mismatch_returns_1_and_alerts_when_enabled(tmp_path: Path) -> None:
+    root = _write_project(tmp_path, alerting_enabled=True)
+    options = _options()
+    summary = _summary(options)
+
+    locks = FakeLocksRepo()
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root, client=FakeAppsFlyer(), loads=FakeLoadsRepo(), locks=locks, alert_calls=alert_calls
+    )
+
+    def _ensure_destination_raises(*a: Any, **k: Any) -> Any:
+        raise SchemaMismatchError("appsflyer.appsflyer_geo_by_date: missing column `foo`")
+
+    deps.ensure_destination = _ensure_destination_raises
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 1
+    assert "missing column" in (summary.error or "")
+    assert len(alert_calls) == 1
+
+
+@pytest.mark.unit
+def test_load_extracts_config_error_alerts_when_enabled(tmp_path: Path) -> None:
+    root = _write_project(tmp_path, alerting_enabled=True)
+    # A second extract with the same `name:` as "standard" makes load_extracts
+    # raise ConfigError (duplicate idempotency/selector key).
+    (root / "extracts" / "dup.yml").write_text(_EXTRACT_YML)
+    options = _options()
+    summary = _summary(options)
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root,
+        client=FakeAppsFlyer(),
+        loads=FakeLoadsRepo(),
+        locks=FakeLocksRepo(),
+        alert_calls=alert_calls,
+    )
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 1
+    assert summary.status == "error"
+    assert len(alert_calls) == 1
+
+
+@pytest.mark.unit
+def test_empty_selector_match_alerts_when_enabled(tmp_path: Path) -> None:
+    root = _write_project(tmp_path, alerting_enabled=True)
+    options = _options(select="no_such_extract")
+    summary = _summary(options)
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root,
+        client=FakeAppsFlyer(),
+        loads=FakeLoadsRepo(),
+        locks=FakeLocksRepo(),
+        alert_calls=alert_calls,
+    )
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 1
+    assert "no_such_extract" in (summary.error or "")
+    assert len(alert_calls) == 1
+
+
+@pytest.mark.unit
+def test_appsflyer_error_resolving_apps_alerts_when_enabled(tmp_path: Path) -> None:
+    root = _write_project(tmp_path, alerting_enabled=True)
+    # apps: null (unset) so apps_for() triggers the account-wide list call.
+    (root / "extracts" / "standard.yml").write_text(
+        "name: standard\nreport_type: geo_by_date_report\ntable: appsflyer_geo_by_date\n"
+    )
+    options = _options()
+    summary = _summary(options)
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root,
+        client=FakeAppsFlyer(),
+        loads=FakeLoadsRepo(),
+        locks=FakeLocksRepo(),
+        alert_calls=alert_calls,
+    )
+
+    def _list_apps_raises(client_: Any, policy: Any) -> Any:
+        raise AppsFlyerError("boom", status=500, body="server error")
+
+    deps.list_apps = _list_apps_raises
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 1
+    assert "AppsFlyer request failed" in (summary.error or "")
+    assert len(alert_calls) == 1
+
+
+@pytest.mark.unit
+def test_dry_run_never_alerts_even_with_alerting_enabled(tmp_path: Path) -> None:
+    """A bona fide exit-0/dry-run path must never alert, regardless of what
+    `error_alerting.enabled` says — only an actual failure does."""
+    root = _write_project(tmp_path, alerting_enabled=True)
+    options = _options(dry_run=True)
+    summary = _summary(options)
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root,
+        client=FakeAppsFlyer(),
+        loads=FakeLoadsRepo(),
+        locks=FakeLocksRepo(),
+        alert_calls=alert_calls,
+    )
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 0
+    assert alert_calls == []
+
+
+@pytest.mark.unit
+def test_dry_run_that_fails_before_planning_does_not_alert(tmp_path: Path) -> None:
+    """Exit paths that sit before the dry-run return (here: nothing matches the
+    selector) still exit 1 under --dry-run, but a dry run never pages anyone."""
+    root = _write_project(tmp_path, alerting_enabled=True)
+    options = _options(dry_run=True, select="no_such_extract")
+    summary = _summary(options)
+    alert_calls: list[dict[str, Any]] = []
+    deps = _deps(
+        root,
+        client=FakeAppsFlyer(),
+        loads=FakeLoadsRepo(),
+        locks=FakeLocksRepo(),
+        alert_calls=alert_calls,
+    )
+
+    rc = run_pipeline(options, summary=summary, deps=deps)
+
+    assert rc == 1
+    assert alert_calls == []
 
 
 # -- dry run --------------------------------------------------------------

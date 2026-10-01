@@ -49,7 +49,7 @@ def run_pipeline(options: RunOptions, *, summary: RunSummary, deps: RunDeps | No
     try:
         loaded = load_extracts(ctx.root, ctx.project)
     except ConfigError as exc:
-        return _fail_early(summary, str(exc))
+        return _fail(ctx, summary, deps, str(exc), dry_run=options.dry_run)
 
     extracts_dir = ctx.root / ctx.project.paths.extracts
     selected_all = select_extracts(loaded, options.select, options.exclude, extracts_dir)
@@ -61,13 +61,24 @@ def run_pipeline(options: RunOptions, *, summary: RunSummary, deps: RunDeps | No
         selected.append(extract)
 
     if not selected:
-        return _fail_early(summary, f"no enabled extracts matched selector: {options.select!r}")
+        return _fail(
+            ctx,
+            summary,
+            deps,
+            f"no enabled extracts matched selector: {options.select!r}",
+            dry_run=options.dry_run,
+        )
 
     summary.run_id = new_run_id(deps.now())
 
     client = deps.client_factory(ctx.profile)
     quota = ctx.project.quota
-    policy = RetryPolicy(max_retries=quota.max_retries, sleep=deps.sleep)
+    policy = RetryPolicy(
+        max_retries=quota.max_retries,
+        sleep=deps.sleep,
+        rand=deps.rand,
+        **quota.retry_policy_kwargs(),
+    )
     apps_resolver = build_apps_resolver(lambda: deps.list_apps(client, policy))
 
     try:
@@ -75,8 +86,12 @@ def run_pipeline(options: RunOptions, *, summary: RunSummary, deps: RunDeps | No
         # memoizes the account-wide list lookup for build_plan below).
         resolved = {e.config.name: apps_resolver.apps_for(e) for e in selected}
     except AppsFlyerError as exc:
-        return _fail_early(
-            summary, f"AppsFlyer request failed (status {exc.status}): {exc.body_excerpt}"
+        return _fail(
+            ctx,
+            summary,
+            deps,
+            f"AppsFlyer request failed (status {exc.status}): {exc.body_excerpt}",
+            dry_run=options.dry_run,
         )
 
     from afly.database.clickhouse import ClickHouseError
@@ -213,14 +228,9 @@ def _run_with_manager(
                 f"{db_table} is locked by {exc.owner} (run {exc.run_id}, {exc.age_seconds:.0f}s ago) — "
                 f"use `afly unlock --table {db_table}` or --force"
             )
-            summary.error = str(exc)
-            summary.finish("error", 1)
-            return 1
+            return _fail(ctx, summary, deps, str(exc), already_echoed=True)
         except SchemaMismatchError as exc:
-            echo_error(str(exc))
-            summary.error = str(exc)
-            summary.finish("error", 1)
-            return 1
+            return _fail(ctx, summary, deps, str(exc))
 
         scheduler = QuotaScheduler(
             plan.jobs,
@@ -229,6 +239,7 @@ def _run_with_manager(
             app_used=app_used,
             clock=deps.clock,
             sleep=deps.sleep,
+            rand=deps.rand,
             max_calls=options.max_calls,
             max_minutes=options.max_minutes,
         )
@@ -242,7 +253,11 @@ def _run_with_manager(
             # sleeping inline. apps_for's own `policy` above stays default
             # (there's no per-key scheduler for the app-list lookup).
             policy_factory=lambda: RetryPolicy(
-                max_retries=quota.max_retries, sleep=deps.sleep, defer_rate_limits=True
+                max_retries=quota.max_retries,
+                sleep=deps.sleep,
+                rand=deps.rand,
+                defer_rate_limits=True,
+                **quota.retry_policy_kwargs(),
             ),
             loads=loads,
             rebuilders=setup.rebuilders,
@@ -303,6 +318,44 @@ def _fail_clickhouse(
     summary.error = message
     summary.aborted = "clickhouse"
     if ctx.project.error_alerting.enabled:
+        send_run_failure_alerts(ctx, summary, deps.alert_sender)
+    summary.finish("error", 1)
+    return 1
+
+
+def _fail(
+    ctx: ProjectContext,
+    summary: RunSummary,
+    deps: RunDeps,
+    message: str,
+    *,
+    already_echoed: bool = False,
+    dry_run: bool = False,
+) -> int:
+    """Fail the run with *message* once the project context has loaded.
+
+    Every exit-1 path from here on down (a bad extract config, an empty
+    selector match, an AppsFlyer error resolving app lists, a held lock, a
+    schema mismatch) funnels through this one helper so each gets exactly one
+    alert when the project opted in — mirroring `_fail_clickhouse` above and
+    `_finish_run`'s own failed-job alert below, which remain the only other
+    two `send_run_failure_alerts` call sites. Every one of the three returns
+    immediately, so a run is never alerted twice. `_fail_early` (no `ctx`) is
+    the one path that predates this: the project/profiles config itself
+    failed to load, so there's no `ErrorAlertingConfig` to even check.
+
+    ``already_echoed`` is for the one caller (a held lock) that prints a
+    friendlier, more actionable message than the bare exception text — the
+    friendlier text is what the operator sees, but *message* (the raw
+    exception) is still what lands in `summary.error` and the alert, same as
+    before this helper existed.
+    """
+    if not already_echoed:
+        echo_error(message)
+    summary.error = message
+    # A --dry-run never alerts: it can still fail here (bad extract config,
+    # empty selector, app-list lookup), but nobody scheduled it to page anyone.
+    if ctx.project.error_alerting.enabled and not dry_run:
         send_run_failure_alerts(ctx, summary, deps.alert_sender)
     summary.finish("error", 1)
     return 1

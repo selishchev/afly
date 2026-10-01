@@ -26,7 +26,9 @@ currency: null                    # "preferred" | "USD" | null (falls back to de
                                    # see the destination `currency` column / formats.md
 
 apps: null                        # optional explicit list of AppsFlyer app ids
-exclude_apps: []                  # subtracted from apps: (or from the account's full app list)
+exclude_apps: []                  # subtracted from apps: (or from the account's full app list) —
+                                   # UNIONED with the project's defaults.exclude_apps:, not
+                                   # overridden by it (see "Defaults inheritance" below)
 platforms: null                   # optional platform filter (e.g. ["ios"]) when apps: is unset
 
 start_date: 2026-01-01            # optional here IF defaults.start_date is set project-wide
@@ -61,6 +63,13 @@ from the project norm. If `start_date` is still unset after the merge (unset
 on both the extract and `defaults`), that extract fails to load with a named
 error — unlike the other fields, there is no safe built-in fallback for
 "which day does history start on".
+
+`exclude_apps` doesn't follow that "unset falls back, set wins outright"
+pattern — it's a list, always "set" (default `[]`), so there's no way to
+tell "deliberately zero exclusions" from "didn't mention it". Instead the
+extract's own `exclude_apps:` and the project's `defaults.exclude_apps:` are
+**UNIONED** (order-preserving, de-duplicated): a project-wide exclusion
+applies to every extract even if that extract also sets its own list.
 
 ## Validation rules (fail the load)
 
