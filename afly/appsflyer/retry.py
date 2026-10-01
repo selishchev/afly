@@ -60,10 +60,21 @@ class RetryPolicy:
     down instead of blocking the whole process. When set, a
     ``RateLimitError`` is re-raised on the very first hit — no sleep, no
     retry loop — after ``on_rate_limit`` (if any) still runs once, so the
-    caller can react immediately. Transient-error handling is unaffected:
-    those still back off inline, since there's no per-key scheduling benefit
-    to deferring a 5xx. Defaults to ``False`` so ``apps``/``debug`` and other
-    direct callers keep the original inline-sleep behaviour.
+    caller can react immediately. Defaults to ``False`` so ``apps``/``debug``
+    and other direct callers keep the original inline-sleep behaviour.
+
+    ``defer_transient`` is the same idea applied to ``TransientError``: a
+    single-threaded executor sleeping through a 5xx/network backoff (up to
+    ~7.5 minutes at the defaults, see ``transient_base_wait``/
+    ``transient_cap``) stalls every other key in the run just as badly as an
+    un-deferred rate limit does — a production run once stood still 13+
+    minutes on one chunk this way. When set, a ``TransientError`` is
+    re-raised on the very first hit — no sleep, no retry loop, no 403→
+    ``AuthError`` escalation (that decision needs the *accumulated* attempt
+    count across re-dispatches, which only the caller's scheduler tracks —
+    see ``afly.run.scheduler.QuotaScheduler.defer_transient``). Defaults to
+    ``False`` so ``apps``/``debug`` and app-list resolution keep retrying
+    inline — they have no per-key scheduler to defer into.
     """
 
     max_retries: int = 5
@@ -75,6 +86,7 @@ class RetryPolicy:
     rand: Callable[[], float] = field(default=random.random)
     on_rate_limit: Callable[[RateLimitError, int], None] | None = None
     defer_rate_limits: bool = False
+    defer_transient: bool = False
     last_attempts: int = field(default=0, init=False)
 
     def _jittered(self, nominal: float) -> float:
@@ -105,6 +117,8 @@ class RetryPolicy:
                 self.sleep(wait)
             except TransientError as exc:
                 last_error = exc
+                if self.defer_transient:
+                    raise
                 if attempt >= self.max_retries:
                     if exc.status == 403:
                         raise AuthError(

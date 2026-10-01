@@ -73,14 +73,15 @@ def _executor(
 ) -> tuple[Executor, RunSummary]:
     """``quota_max_retries`` defaults to ``max_retries`` (they're the same
     field, ``QuotaConfig.max_retries``/``RetryPolicy.max_retries``, but a
-    RateLimitError test needs to control the scheduler's deferral budget
-    independently of the RetryPolicy attempt count, which no longer matters
-    for RateLimitError now that `defer_rate_limits=True` raises on the first
-    hit regardless of it). ``max_waves_in_flight`` defaults to the
-    ``QuotaConfig`` default (2) — most tests here exercise a single wave and
-    are indifferent to it; lookahead-specific tests override it (and, for
-    ``max_waves_in_flight=1``, are asserting the *old* strict order is still
-    reproduced exactly)."""
+    RateLimitError/TransientError test needs to control the scheduler's
+    deferral budget independently of the RetryPolicy attempt count, which no
+    longer matters for either error now that `defer_rate_limits=True`/
+    `defer_transient=True` raise on the first hit regardless of it — mirrors
+    how ``afly.run.runner`` builds the real per-job policy). ``max_waves_in_flight``
+    defaults to the ``QuotaConfig`` default (2) — most tests here exercise a
+    single wave and are indifferent to it; lookahead-specific tests override
+    it (and, for ``max_waves_in_flight=1``, are asserting the *old* strict
+    order is still reproduced exactly)."""
     summary = RunSummary(selector="*")
     options = options or RunOptions(select="*")
     quota = QuotaConfig(
@@ -99,7 +100,10 @@ def _executor(
         scheduler=scheduler,
         client=client,  # type: ignore[arg-type]
         policy_factory=lambda: RetryPolicy(
-            max_retries=max_retries, sleep=lambda s: None, defer_rate_limits=True
+            max_retries=max_retries,
+            sleep=lambda s: None,
+            defer_rate_limits=True,
+            defer_transient=True,
         ),
         loads=loads,  # type: ignore[arg-type]
         rebuilders=rebuilders,  # type: ignore[arg-type]
@@ -494,6 +498,175 @@ def test_rate_limited_job_deferred_other_apps_run_between_its_attempts() -> None
 
     assert _finished(loads, "standard", "b1").status == "success"
     assert _finished(loads, "standard", "c1").status == "success"
+
+
+# -- transient errors: deferred to the scheduler, not blocking other keys --
+
+
+@pytest.mark.unit
+def test_transient_error_deferred_other_keys_run_between_its_attempts() -> None:
+    """A key that fails transiently twice then succeeds on its 3rd attempt:
+    ends `success` with api_calls accumulated across all 3 attempts,
+    start_chunk fired exactly once — and the actual fix being tested here —
+    the other two keys' jobs were fetched *between* a1's two failures rather
+    than the whole run stalling on a1's backoff (mirrors the equivalent
+    rate-limit test above)."""
+    day1 = date(2026, 1, 1)
+    job_a = _job("standard", "a1", day1, day1)
+    job_b = _job("standard", "b1", day1, day1)
+    job_c = _job("standard", "c1", day1, day1)
+
+    client = FakeAppsFlyer()
+    client.script(
+        _REPORT_TYPE,
+        "a1",
+        day1,
+        day1,
+        [
+            (503, "server error"),
+            (503, "server error"),
+            "Date,Installs\n2026-01-01,1\n",
+        ],
+    )
+    client.script(_REPORT_TYPE, "b1", day1, day1, "Date,Installs\n2026-01-01,2\n")
+    client.script(_REPORT_TYPE, "c1", day1, day1, "Date,Installs\n2026-01-01,3\n")
+
+    events: list[str] = []
+    orig_get = client.get
+
+    def spy_get(
+        path: str, params: dict[str, object] | None = None, accept: str = "application/json"
+    ):  # type: ignore[no-untyped-def]
+        app_id = path.split("/app/", 1)[1].split("/", 1)[0]
+        events.append(f"fetch {app_id}")
+        return orig_get(path, params=params, accept=accept)
+
+    client.get = spy_get  # type: ignore[method-assign]
+
+    clock = FakeClock()
+
+    def spy_sleep(seconds: float) -> None:
+        events.append(f"sleep {seconds}")
+        clock.advance(seconds)
+
+    loads = FakeLoadsRepo()
+    rebuilder = FakeRebuilder()
+    executor, summary = _executor(
+        [job_a, job_b, job_c],
+        client=client,
+        loads=loads,
+        rebuilders={("marts", "t"): rebuilder},
+        max_retries=3,
+        quota_max_retries=5,
+        clock=clock,
+        sleep=spy_sleep,
+    )
+    executor.run()
+
+    finished = _finished(loads, "standard", "a1")
+    assert finished.status == "success"
+    assert finished.api_calls == 3  # 2 transiently-failed attempts + the successful one
+
+    a1_started = [s for s in loads.started if s.load.app_id == "a1"]
+    assert len(a1_started) == 1  # start_chunk fired once, not per re-dispatch
+
+    a1_positions = [i for i, c in enumerate(client.calls) if c[1] == "a1"]
+    assert len(a1_positions) == 3
+    between_first_two_attempts = client.calls[a1_positions[0] + 1 : a1_positions[1]]
+    assert {c[1] for c in between_first_two_attempts} == {"b1", "c1"}
+
+    # The actual throughput fix: b1/c1 dispatched before a1's deferred
+    # backoff sleep, not after — the old inline-retry behaviour would have
+    # slept in place with b1/c1 untouched.
+    assert "fetch a1" in events
+    assert events.index("fetch b1") < events.index("sleep 30.0")
+    assert events.index("fetch c1") < events.index("sleep 30.0")
+
+    assert _finished(loads, "standard", "b1").status == "success"
+    assert _finished(loads, "standard", "c1").status == "success"
+
+
+@pytest.mark.unit
+def test_transient_error_always_failing_ends_one_failed_chunk_pair_skipped() -> None:
+    """A key that transiently fails on every attempt ends as a single failed
+    chunk (not multiple), with api_calls accumulated across every deferred
+    attempt, and — the pair invariant — a later chunk of the same
+    (extract, app) pair is skipped without ever being fetched."""
+    day1 = date(2026, 1, 1)
+    day2 = date(2026, 1, 2)
+    job1 = _job("standard", "app1", day1, day1, index=0)
+    job2 = _job("standard", "app1", day2, day2, index=1)  # same pair, later wave
+
+    client = FakeAppsFlyer()
+    client.script(_REPORT_TYPE, "app1", day1, day1, (502, "bad gateway"))
+    # job2 intentionally has no scripted response: if the pair-barrier ever
+    # let it dispatch before job1 is terminal, FakeAppsFlyer.get() raises.
+
+    loads = FakeLoadsRepo()
+    rebuilder = FakeRebuilder()
+    clock = FakeClock()
+    sleep = FakeSleep(clock)
+    executor, summary = _executor(
+        [job1, job2],
+        client=client,
+        loads=loads,
+        rebuilders={("marts", "t"): rebuilder},
+        max_waves_in_flight=2,
+        quota_max_retries=2,
+        clock=clock,
+        sleep=sleep,
+    )
+    executor.run()
+
+    rows = [f for f in loads.finished if f.load.extract == "standard" and f.load.app_id == "app1"]
+    assert len(rows) == 2
+    row1 = next(r for r in rows if r.load.from_date == day1)
+    row2 = next(r for r in rows if r.load.from_date == day2)
+
+    assert row1.status == "failed"
+    assert row1.api_calls == 2  # both transiently-failed attempts counted
+    assert row1.http_status == 502
+    assert row1.error is not None and "bad gateway" in row1.error
+
+    assert row2.status == "skipped"
+    assert row2.skip_reason == "skipped (earlier chunk failed)"
+    assert (_REPORT_TYPE, "app1", day2, day2) not in client.calls
+    assert summary.aborted is None  # a plain transient exhaustion doesn't abort the run
+
+
+@pytest.mark.unit
+def test_bare_403_exhausted_via_deferral_aborts_as_auth() -> None:
+    """A 403 without AppsFlyer's rate-limit marker is a TransientError (see
+    afly.appsflyer.errors.TransientError's docstring); exhausting its
+    deferred retries must still produce the AUTH_ABORT behaviour, matching
+    RetryPolicy's inline parity rule (escalate to AuthError) rather than a
+    plain failed chunk."""
+    day1 = date(2026, 1, 1)
+    job_a = _job("e_a", "a1", day1, day1, index=0, table="t")
+    job_b = _job("e_b", "b1", day1, day1, index=0, table="t")  # same wave, must be skipped
+
+    client = FakeAppsFlyer()
+    client.script(_REPORT_TYPE, "a1", day1, day1, "Date,Installs\n2026-01-01,1\n")
+    client.script(_REPORT_TYPE, "b1", day1, day1, (403, "abuse protection, no quota marker"))
+
+    loads = FakeLoadsRepo()
+    rebuilder = FakeRebuilder()
+    executor, summary = _executor(
+        [job_a, job_b],
+        client=client,
+        loads=loads,
+        rebuilders={("marts", "t"): rebuilder},
+        quota_max_retries=1,
+    )
+    executor.run()
+
+    assert summary.aborted == "auth"
+    assert _finished(loads, "e_a", "a1").status == "success"
+
+    finished_b = _finished(loads, "e_b", "b1")
+    assert finished_b.status == "failed"
+    assert finished_b.http_status == 403
+    assert finished_b.error is not None and "abuse protection" in finished_b.error
 
 
 # -- wave lookahead (max_waves_in_flight) -----------------------------------

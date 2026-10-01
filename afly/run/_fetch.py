@@ -14,6 +14,7 @@ from typing import Any
 
 from afly.appsflyer.client import AppsFlyerClient
 from afly.appsflyer.errors import (
+    AppsFlyerError,
     AuthError,
     EmptyBodyError,
     PermanentError,
@@ -28,6 +29,7 @@ from afly.run.planner import ChunkJob
 
 AUTH_ABORT = "auth_abort"
 DEFERRED = "deferred"
+TRANSIENT_DEFERRED = "transient_deferred"
 
 
 @dataclass
@@ -42,6 +44,14 @@ class FetchOutcome:
       :data:`DEFERRED`, and ``api_calls``/``retry_after`` describe the one
       HTTP attempt just spent (the caller accumulates ``api_calls`` across
       every attempt of the same job; this call only reports its own).
+    - **Transiently failed** (policy built with ``defer_transient=True``):
+      ``result`` is ``None`` — same non-terminal shape as the rate-limited
+      case, decided by ``QuotaScheduler.defer_transient`` instead — ``signal``
+      is :data:`TRANSIENT_DEFERRED`, and ``api_calls``/``http_status``/
+      ``error`` describe this one attempt (the caller accumulates
+      ``api_calls`` the same way, and keeps the latest ``http_status``/
+      ``error`` in case the scheduler eventually gives up and this has to
+      become a terminal failure).
     - **Failed** (auth/permanent/transient/parse error): ``result`` is a
       terminal ``JobResult`` (``status="failed"``), ``signal`` is
       :data:`AUTH_ABORT` for an ``AuthError`` (the whole run should stop),
@@ -54,6 +64,8 @@ class FetchOutcome:
     signal: str | None = None
     api_calls: int = 0
     retry_after: float | None = None
+    http_status: int | None = None
+    error: str | None = None
 
 
 def process_job(
@@ -100,18 +112,42 @@ def process_job(
         api_calls = client.api_calls - start_calls
         record_call(job, api_calls, clock())
         return FetchOutcome(None, signal=DEFERRED, api_calls=api_calls, retry_after=exc.retry_after)
-    except (PermanentError, EmptyBodyError, TransientError) as exc:
-        # The failed attempts were real HTTP calls: they count against the key's
-        # spacing and belong in _afly_loads, together with what AppsFlyer said.
+    except TransientError as exc:
+        # The failed attempt was a real HTTP call: it counts against the key's
+        # spacing and belongs in _afly_loads, together with what AppsFlyer said.
         api_calls = client.api_calls - start_calls
         record_call(job, api_calls, clock())
-        detail = f"{exc} (status {exc.status})" if exc.status else str(exc)
-        if exc.body_excerpt:
-            detail += f": {exc.body_excerpt}"
+        if policy.defer_transient:
+            # Non-terminal: QuotaScheduler.defer_transient decides whether to
+            # re-queue this job or give up — see that method's docstring for
+            # why this doesn't retry/sleep here the way the non-deferred
+            # branch below does.
+            return FetchOutcome(
+                None,
+                signal=TRANSIENT_DEFERRED,
+                api_calls=api_calls,
+                http_status=exc.status,
+                error=_error_detail(exc),
+            )
         result = JobResult(
             job=job,
             status="failed",
-            error=detail[:500],
+            error=_error_detail(exc),
+            api_calls=api_calls,
+            http_status=exc.status,
+            started_at=started_at,
+            finished_at=now(),
+        )
+        return FetchOutcome(result, api_calls=api_calls)
+    except (PermanentError, EmptyBodyError) as exc:
+        # The failed attempt was a real HTTP call: it counts against the key's
+        # spacing and belongs in _afly_loads, together with what AppsFlyer said.
+        api_calls = client.api_calls - start_calls
+        record_call(job, api_calls, clock())
+        result = JobResult(
+            job=job,
+            status="failed",
+            error=_error_detail(exc),
             api_calls=api_calls,
             http_status=exc.status,
             started_at=started_at,
@@ -163,4 +199,12 @@ def process_job(
     return FetchOutcome(result, rows=parsed.rows, unknown_headers=parsed.unknown_headers)
 
 
-__all__ = ["AUTH_ABORT", "DEFERRED", "FetchOutcome", "process_job"]
+def _error_detail(exc: AppsFlyerError) -> str:
+    """The failed-chunk error string: ``"<exc> (status N): <body excerpt>"``, capped at 500 chars."""
+    detail = f"{exc} (status {exc.status})" if exc.status else str(exc)
+    if exc.body_excerpt:
+        detail += f": {exc.body_excerpt}"
+    return detail[:500]
+
+
+__all__ = ["AUTH_ABORT", "DEFERRED", "TRANSIENT_DEFERRED", "FetchOutcome", "process_job"]

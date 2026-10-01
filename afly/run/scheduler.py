@@ -36,6 +36,16 @@ A live AppsFlyer rate-limit hit (as opposed to the two budgets above, which
 are checked before a call is even made) is handled via :meth:`defer`: the
 job goes back into its own key's queue with a delay, instead of the caller
 sleeping in place — see that method's docstring for why.
+
+A ``TransientError`` (5xx, network error, read timeout, retryable
+404/408/416/425) gets the same non-blocking treatment via
+:meth:`defer_transient`: without it, the single-threaded executor sleeps
+through the whole exponential backoff (up to ~7.5 minutes at the defaults)
+with every other key idle — a production run once stalled 13+ minutes this
+way on a single chunk. :meth:`defer_transient` keeps its own per-job attempt
+counter (separate from the rate-limit one :meth:`defer` uses) and reproduces
+``RetryPolicy``'s inline transient schedule attempt-for-attempt, so operators
+see the same pacing, just non-blocking.
 """
 
 from __future__ import annotations
@@ -99,6 +109,10 @@ class QuotaScheduler:
         self._next_allowed: dict[tuple[str, str], float] = {}
         self._last_call_at: float | None = None
         self._deferral_counts: dict[int, int] = {}
+        # Separate from `_deferral_counts` (rate-limit deferrals) — a job can
+        # independently rack up attempts of each kind, and `defer_transient`'s
+        # exponential schedule is unrelated to `defer`'s linear one.
+        self._transient_deferral_counts: dict[int, int] = {}
 
         # Cross-wave lookahead bookkeeping: each `load_wave` call is one
         # admission batch, numbered in call order. `_job_batch` records which
@@ -233,6 +247,55 @@ class QuotaScheduler:
         count += 1
         self._deferral_counts[jid] = count
         nominal = max(delay_seconds or 0.0, self.quota.short_call_interval_seconds) * count
+        wait = nominal * (1 + self.quota.retry_jitter * self.rand())
+        ready_at = self.clock() + wait
+        current = self._next_allowed.get(job.key, float("-inf"))
+        self._next_allowed[job.key] = max(current, ready_at)
+        self._enqueue(job)
+        return True
+
+    def defer_transient(self, job: ChunkJob) -> bool:
+        """Send a transiently-failed *job* back to the scheduler instead of retrying inline.
+
+        Mirrors :meth:`defer` (the rate-limit path) — same non-blocking
+        re-queue, same ``_enqueue`` ordering guarantee (a later-wave sibling
+        of the same pair, already queued behind this job, still waits its
+        turn) — but with its **own** per-job attempt counter
+        (``_transient_deferral_counts``, independent of ``_deferral_counts``)
+        and AppsFlyer's *transient* backoff schedule instead of the
+        rate-limit one: on the job's *n*-th transient failure (``n`` = 1, 2,
+        ...), the nominal wait is ``min(quota.transient_base_wait_seconds *
+        2**(n-1), quota.transient_max_wait_seconds)`` — 30s/60s/120s/240s at
+        the defaults — then jittered the same way :meth:`defer` jitters its
+        own wait. This reproduces :class:`~afly.appsflyer.retry.RetryPolicy`'s
+        inline ``TransientError`` handling attempt-for-attempt, so operators
+        see identical pacing, just non-blocking.
+
+        Gives up once ``n >= quota.max_retries`` (the same attempt count at
+        which an inline, non-deferred ``RetryPolicy`` would stop retrying and
+        re-raise) — but, unlike :meth:`defer`, does **not** record a
+        :class:`SkippedJob` itself: a transient-exhausted job is a genuine
+        failure (the inline policy re-raises ``TransientError``, it doesn't
+        return any kind of "skip"), so the caller (``Executor``) is
+        responsible for turning a ``False`` return into a terminal failed
+        ``JobResult`` — including the 403-without-quota-marker parity rule
+        (escalate to an auth abort instead of a plain failure) that only the
+        caller has enough context (the last response's status) to apply.
+
+        Returns ``True`` if the job was re-queued, ``False`` once it's out of
+        attempts.
+        """
+        jid = id(job)
+        n = self._transient_deferral_counts.get(jid, 0) + 1
+        if n >= self.quota.max_retries:
+            self._transient_deferral_counts.pop(jid, None)
+            return False
+
+        self._transient_deferral_counts[jid] = n
+        nominal = min(
+            self.quota.transient_base_wait_seconds * (2 ** (n - 1)),
+            self.quota.transient_max_wait_seconds,
+        )
         wait = nominal * (1 + self.quota.retry_jitter * self.rand())
         ready_at = self.clock() + wait
         current = self._next_allowed.get(job.key, float("-inf"))

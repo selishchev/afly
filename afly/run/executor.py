@@ -33,7 +33,7 @@ from afly.appsflyer.client import AppsFlyerClient
 from afly.appsflyer.retry import RetryPolicy
 from afly.cli._output import echo_warning
 from afly.run import _echo
-from afly.run._fetch import AUTH_ABORT, DEFERRED, process_job
+from afly.run._fetch import AUTH_ABORT, DEFERRED, TRANSIENT_DEFERRED, FetchOutcome, process_job
 from afly.run._job_result import JobResult, job_result_to_dict
 from afly.run._protocols import LoadsRepoLike, RebuilderLike
 from afly.run._rebuild import rebuild_wave
@@ -98,6 +98,12 @@ class Executor:
         # accumulates across every attempt instead of resetting.
         self._job_started_at: dict[int, datetime] = {}
         self._pending_api_calls: dict[int, int] = {}
+        # Same idea as `_pending_api_calls`, for a job currently cooling down
+        # from a deferred TransientError: the latest (http_status, error
+        # detail) seen, kept in case the scheduler eventually gives up and
+        # this has to become a terminal failed JobResult (see
+        # `_process_job`'s TRANSIENT_DEFERRED handling).
+        self._pending_transient: dict[int, tuple[int | None, str]] = {}
 
         # Wave-lookahead bookkeeping — set fresh at the top of `run()` (a
         # Plan's waves are static, known up front, so there's nothing to
@@ -273,9 +279,42 @@ class Executor:
             self.scheduler.defer(job, outcome.retry_after or 0.0)
             return None
 
+        if outcome.signal == TRANSIENT_DEFERRED:
+            self._pending_api_calls[jid] = self._pending_api_calls.get(jid, 0) + outcome.api_calls
+            self._pending_transient[jid] = (outcome.http_status, outcome.error or "")
+            if self.scheduler.defer_transient(job):
+                # Re-queued — nothing terminal yet, same as a DEFERRED
+                # rate-limit job; the accumulated state above waits for its
+                # eventual success/exhaustion.
+                return None
+            # Exhausted: unlike a rate-limit deferral, `defer_transient`
+            # doesn't record a SkippedJob itself (a transient-exhausted job
+            # is a genuine failure, not a quota skip) — build the terminal
+            # result here and fall through to the common handling below,
+            # which pops the accumulated `_pending_api_calls` for us.
+            http_status, error = self._pending_transient.pop(jid, (None, ""))
+            outcome = FetchOutcome(
+                JobResult(
+                    job=job,
+                    status="failed",
+                    error=error,
+                    http_status=http_status,
+                    started_at=started_at,
+                    finished_at=self.now(),
+                ),
+                # A 403 without the quota marker is a TransientError (see
+                # afly.appsflyer.errors.TransientError's docstring) that
+                # RetryPolicy's inline path escalates to AuthError once
+                # retries are exhausted — reproduce that parity here too, so
+                # exhausting the deferred schedule on one aborts the run the
+                # same way an inline exhaustion would.
+                signal=AUTH_ABORT if http_status == 403 else None,
+            )
+
         result = outcome.result
         assert result is not None  # every non-DEFERRED signal carries a terminal result
         result.api_calls += self._pending_api_calls.pop(jid, 0)
+        self._pending_transient.pop(jid, None)
         self._job_started_at.pop(jid, None)
         self._wave_results[jid] = result
         self._wave_tracker.note_terminal(job)
