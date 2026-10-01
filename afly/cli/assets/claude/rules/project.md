@@ -33,6 +33,8 @@ defaults:                         # project-wide fallback for optional extract f
   keep_unknown_columns: false     # default false
   partition_granularity: month    # "month" | "day", default "month" — destination PARTITION BY
                                    # (toYYYYMM(date) vs toYYYYMMDD(date)); see idempotency.md
+  exclude_apps: []                # default [] — app ids dropped from EVERY extract; UNIONED
+                                   # (not overridden) into each extract's own exclude_apps:
 
 quota:                            # AppsFlyer Pull API budget afly enforces on itself
   short_call_interval_seconds: 65 # default 65 — per-(app,report_type) throttle (not 60: AppsFlyer's
@@ -43,6 +45,10 @@ quota:                            # AppsFlyer Pull API budget afly enforces on i
   reserve_long_calls: 0           # default 0 — headroom subtracted from both budgets above
   min_gap_seconds: 0.5            # default 0.5 — global minimum gap between any two calls
   max_retries: 5                  # default 5
+  transient_base_wait_seconds: 30 # default 30 — 5xx/network backoff base; doubles per attempt
+  transient_max_wait_seconds: 600 # default 600 — cap on the nominal (pre-jitter) transient wait
+  retry_jitter: 0.25              # default 0.25 — +0..25% random spread on every retry/deferral
+                                   # wait (never below nominal); see quotas.md's Retry/backoff
   max_waves_in_flight: 8          # default 8 — plan waves the scheduler may draw jobs from at
                                    # once; 1 = old strict one-wave-at-a-time order — see quotas.md
 
@@ -110,6 +116,9 @@ alert_channels:
     username: afly                                   # default "afly"
     icon_emoji: null                                 # optional
     timeout: 10                                       # default 10
+    run_url: "${PREFECT_UI_BASE_URL}/runs/flow-run/${PREFECT__FLOW_RUN_ID}"  # default "" — link to
+                                   # this run in your orchestrator; empty/unresolved after env
+                                   # interpolation -> silently omitted from the alert, never an error
 ```
 
 - **`internal_database`** is where `_afly_loads`/`_afly_locks` live — keep it
@@ -125,11 +134,16 @@ alert_channels:
   different ClickHouse clusters or AppsFlyer accounts) and select one per run
   with `afly run --profile <name>`.
 - **`alert_channels`** are referenced by name from `error_alerting.channels`
-  in `afly_project.yml` — this is a *run-failure* alert (auth broke, ClickHouse
-  broke, the run aborted), fired at most once per run, never for a
-  quota/policy skip. `type: mattermost`/`slack` post to the webhook's native
-  "attachments" shape; `type: webhook` posts a plain `{title, text, project,
-  run_id}` JSON body.
+  in `afly_project.yml` — this is a *run-failure* alert, fired at most once
+  per run on any exit-1 outcome that happens after the project loaded (a
+  failed/aborted run, a held lock, a schema mismatch, a bad extract config,
+  an empty selector match, an AppsFlyer app-list error), never for a
+  quota/policy skip or `--dry-run`. `type: mattermost`/`slack` post to the
+  webhook's native "attachments" shape — mentions (normalized to exactly one
+  leading `@` each) are the attachment's last line, with the resolved
+  `run_url` (if any) on the line just above; `type: webhook` posts a plain
+  `{title, text, project, run_id, run_url, mentions}` JSON body. See
+  `docs/guides/alerting.md` for the exact trigger list and payload shape.
 
 ## Env interpolation syntax
 

@@ -24,6 +24,7 @@ silently ignored.
 | `defaults.on_empty` | `skip` \| `replace` | `skip` | Fallback `on_empty`. |
 | `defaults.keep_unknown_columns` | bool | `false` | Fallback `keep_unknown_columns`. |
 | `defaults.partition_granularity` | `month` \| `day` | `month` | Fallback `partition_granularity` — the destination's `PARTITION BY` grain. Extracts sharing one `table:` must resolve to the same value (checked at load time, see [Idempotency guide](../guides/idempotency.md)). |
+| `defaults.exclude_apps` | list[string] | `[]` | Project-wide app ids to drop from EVERY extract's app list. **UNIONED** into each extract's own `exclude_apps:` (not overridden by it) — see [Extracts guide](../guides/extracts.md#apps). |
 | `quota.short_call_interval_seconds` | int, ≥0 | `65` | Per-`(app, report_type)` throttle (not 60 — AppsFlyer's own per-minute window still 403s on exactly-60s spacing). |
 | `quota.long_call_min_days` | int, ≥1 | `3` | Chunk day-span at/above which a call counts as "long". |
 | `quota.account_long_calls_per_day` | int, ≥0 | `120` | Account-wide daily long-call budget. |
@@ -31,11 +32,14 @@ silently ignored.
 | `quota.reserve_long_calls` | int, ≥0 | `0` | Headroom subtracted from both budgets above. |
 | `quota.min_gap_seconds` | float, ≥0 | `0.5` | Global minimum gap between any two AppsFlyer calls. |
 | `quota.max_retries` | int, ≥0 | `5` | Retry attempts before giving up on a call. |
+| `quota.transient_base_wait_seconds` | float, ≥0 | `30` | Nominal wait before the first transient-error (5xx/network/un-marked 403) retry; doubles each attempt up to `transient_max_wait_seconds`. See [Quotas & scheduling](../guides/quotas.md#retry--backoff). |
+| `quota.transient_max_wait_seconds` | float, ≥0 | `600` | Cap on the nominal (pre-jitter) transient-error wait. |
+| `quota.retry_jitter` | float, 0–1 | `0.25` | Random spread added on top of every retry/deferral wait: `actual = nominal * (1 + retry_jitter * U)`. Only ever lengthens a wait. |
 | `quota.max_waves_in_flight` | int, ≥1 | `8` | How many plan waves the scheduler may draw jobs from at once. `1` reproduces the old strict one-wave-at-a-time order; see [Quotas & scheduling](../guides/quotas.md#wave-lookahead). |
 | `lock_timeout_seconds` | int, 60–86400 | `7200` | Age at which a `running` lock is treated as stale. |
 | `error_alerting.enabled` | bool | `false` | Whether a run-failure alert can fire. |
 | `error_alerting.channels` | list[string] | `[]` | Channel names, looked up in `profiles.yml`'s `alert_channels`. |
-| `error_alerting.mentions` | list[string] | `[]` | Passed through to the alert payload. |
+| `error_alerting.mentions` | list[string] | `[]` | Passed through to the alert payload (normalized to exactly one leading `@` each — see [Alerting](../guides/alerting.md)). |
 
 ## Profiles (`profiles.yml`)
 
@@ -53,7 +57,7 @@ silently ignored.
 | `profiles.<name>.clickhouse.password` | string | `""` | ClickHouse password. |
 | `profiles.<name>.clickhouse.database` | string | *(required)* | Database destination tables live in. |
 | `profiles.<name>.clickhouse.internal_database` | string \| null | same as `database` | Database `_afly_loads`/`_afly_locks` live in. |
-| `profiles.<name>.clickhouse.staging_database` | string \| null | the destination's database | Database for the transient `…__afly_staging` tables of the partition rebuild (named `<db>__<table>__afly_staging` when it differs from the destination's). Set it when the destination database is mirrored automatically — e.g. a Distributed-wrapper sync over `raw` — so staging tables are never published. |
+| `profiles.<name>.clickhouse.staging_database` | string \| null | the destination's database | Database for the transient `…__afly_staging` tables of the partition rebuild (named `<db>__<table>__afly_staging` when it differs from the destination's). (Re)created at the start of each `afly run` and dropped again at the end — never visible between runs. Set it when the destination database is mirrored automatically — e.g. a Distributed-wrapper sync over `raw` — so staging tables are never published. |
 | `profiles.<name>.clickhouse.secure` | bool | `false` | TLS. |
 | `profiles.<name>.clickhouse.verify` | bool | `true` | TLS certificate verification. |
 | `profiles.<name>.clickhouse.settings` | dict | `{}` | Passed through to `clickhouse-driver`. |
@@ -65,6 +69,7 @@ silently ignored.
 | `alert_channels.<name>.username` | string | `afly` | Bot display name. |
 | `alert_channels.<name>.icon_emoji` | string \| null | `null` | Bot icon. |
 | `alert_channels.<name>.timeout` | int, ≥1 | `10` | POST timeout, seconds. |
+| `alert_channels.<name>.run_url` | string | `""` | Link to the orchestrator's run (e.g. a Prefect flow-run URL), typically env-interpolated. Empty or still-unresolved after interpolation → silently omitted from the payload (never an error, never a warning) — see [Alerting](../guides/alerting.md). |
 
 ### Environment interpolation
 
@@ -88,7 +93,7 @@ resolved from the process environment at load time. See
 | `timezone` | string \| null | project `defaults.timezone` | Override. |
 | `currency` | `preferred` \| `USD` \| null | project `defaults.currency` | Override. Same caveat as `defaults.currency` above — AppsFlyer ignores it for these reports. |
 | `apps` | list[string] \| null | `null` (whole account) | Explicit app ids. |
-| `exclude_apps` | list[string] | `[]` | Subtracted from `apps`/the account list. |
+| `exclude_apps` | list[string] | `[]` | Subtracted from `apps`/the account list. **UNIONED** with project `defaults.exclude_apps` (not overridden by it) when merged via `with_defaults` — an explicit `--apps` on `afly run` still can't bring back an excluded app. |
 | `platforms` | list[string] \| null | `null` | Filter when `apps` is unset (e.g. `["ios"]`). |
 | `start_date` | date \| null | project `defaults.start_date` | Earliest day ever pulled. Required somewhere. |
 | `lookback_days` | int, ≥0 \| null | project `defaults.lookback_days` | Override. |

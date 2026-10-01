@@ -52,7 +52,7 @@ afly/
 │   ├── _setup.py                          # per-run lock + destination + staging-table setup
 │   ├── _apps.py                            # resolve which app ids each extract targets
 │   ├── _alert.py                            # once-per-run failure alert dispatch
-│   ├── summary.py                           # RunSummary — the --json schema_version:1 contract
+│   ├── summary.py                           # RunSummary — the --json schema_version:2 contract
 │   └── runner.py                            # run_pipeline — wires all of the above together
 ├── alerting/webhook.py                      # Mattermost/Slack/webhook failure-alert POST
 └── utils/                                    # datetime (naive-UTC), env interpolation, table naming
@@ -134,8 +134,9 @@ ClickHouse manager factory, the AppsFlyer client factory, wall/monotonic
 clock, sleep, the alert sender) as overridable fields. This is what makes the
 scheduler/executor/planner unit-testable under a fake clock with zero real
 sleeps and zero real HTTP/ClickHouse calls — the integration suite
-(`clickhouse-server:22.11` via testcontainers) is what exercises the real
-driver and the real partition-swap mechanics end to end.
+(`clickhouse-server:22.11` and `:26.3` via testcontainers — one container
+per image) is what exercises the real driver and the real partition-swap
+mechanics end to end.
 
 ### Why naive UTC everywhere
 

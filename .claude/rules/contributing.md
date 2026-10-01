@@ -22,7 +22,7 @@ wired via `[project.scripts]`.
 
 ```bash
 .venv/bin/pytest -m "not integration"   # unit — no network/DB
-.venv/bin/pytest -m integration          # needs Docker; spins up clickhouse-server:22.11
+.venv/bin/pytest -m integration          # needs Docker; spins up clickhouse-server:22.11 and :26.3
 ```
 
 Markers (`unit`/`integration`) are declared in `pyproject.toml`

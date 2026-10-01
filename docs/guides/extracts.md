@@ -82,6 +82,12 @@ An explicit `apps:` list is resolved with no AppsFlyer call; leaving it unset
 triggers one (cached) call to the management API per run, filtered by
 `platforms`/`exclude_apps`. Cross-check ids against `afly apps`.
 
+`exclude_apps:` here is **UNIONED** with the project's own
+`defaults.exclude_apps:` (see [Configuration](configuration.md)), not
+overridden by it — a project-wide exclusion (e.g. a decommissioned test app)
+applies to every extract even if this one also names its own exclusions. An
+explicit `afly run --apps` can't bring back an app either list excludes.
+
 ## Validation
 
 ```bash

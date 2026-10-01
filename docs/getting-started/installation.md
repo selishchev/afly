@@ -4,8 +4,10 @@
 
 - Python 3.10+
 - A ClickHouse server reachable over its **native protocol** port (commonly
-  `9000`, or `9440` for TLS — not the HTTP port `8123`). Tested against
-  ClickHouse 22.11.
+  `9000`, or `9440` for TLS — not the HTTP port `8123`), or its HTTP port
+  (see `protocol: http` in [Configuration](../guides/configuration.md)).
+  Tested against ClickHouse 22.11 and 26.3 — CI's integration suite runs the
+  full test matrix against both.
 - An AppsFlyer account with **API V2** (Pull API) access and a Bearer token.
 
 ## Install

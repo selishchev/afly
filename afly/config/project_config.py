@@ -10,13 +10,18 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from afly.config import ConfigError
 from afly.schema import DEFAULT_PARTITION_GRANULARITY, Granularity
+from afly.utils.retry_defaults import (
+    RETRY_JITTER,
+    TRANSIENT_BASE_WAIT_SECONDS,
+    TRANSIENT_MAX_WAIT_SECONDS,
+)
 
 
 class PathsConfig(BaseModel):
@@ -34,6 +39,19 @@ class TablesConfig(BaseModel):
 
     loads: str = "_afly_loads"
     locks: str = "_afly_locks"
+
+
+class RetryPolicyKwargs(TypedDict):
+    """Shape of :meth:`QuotaConfig.retry_policy_kwargs` — a plain ``dict[str,
+    float]`` return type makes mypy treat every one of ``RetryPolicy``'s other
+    (non-float) keyword-only fields as a possible target of a ``**`` call-site
+    unpacking, which it then rejects. Naming the exact three keys here is what
+    lets ``RetryPolicy(..., **quota.retry_policy_kwargs())`` type-check.
+    """
+
+    transient_base_wait: float
+    transient_cap: float
+    retry_jitter: float
 
 
 class ExtractDefaults(BaseModel):
@@ -61,6 +79,13 @@ class ExtractDefaults(BaseModel):
     currency: Literal["preferred", "USD"] = "preferred"
     on_empty: Literal["skip", "replace"] = "skip"
     keep_unknown_columns: bool = False
+    # Project-wide app ids to drop from EVERY extract's app list, on top of
+    # whatever that extract's own `exclude_apps:` already names — see
+    # ExtractConfig.with_defaults, which UNIONS this into the extract's list
+    # rather than falling back to it. Use this for an app the whole project
+    # should never pull (e.g. a decommissioned/test app id), instead of
+    # repeating it in every extract's own `exclude_apps:`.
+    exclude_apps: list[str] = Field(default_factory=list)
     # "month" (default) -> PARTITION BY toYYYYMM(date); "day" -> toYYYYMMDD(date).
     # See afly.schema.Granularity / afly.database.ddl.destination_ddl. A real
     # destination table has been measured at ~1.7MB/41k rows per 23 days, so
@@ -87,10 +112,26 @@ class QuotaConfig(BaseModel):
     hand out jobs from at once. ``1`` reproduces the old strict
     one-wave-at-a-time behaviour — a wave whose only remaining jobs are
     rate-limited stalls the whole run even though every other key is idle.
-    The default, ``2``, lets the executor keep dispatching ready jobs from
-    the next wave while a deferred job in the current one cools down; a wave
-    is still rebuilt only once *every* one of its own jobs is terminal, and
-    strictly in wave order.
+    The default, ``8``, lets the executor keep dispatching ready jobs from
+    several further-ahead waves while a deferred job in an earlier one cools
+    down; a wave is still rebuilt only once *every* one of its own jobs is
+    terminal, and strictly in wave order. (Raised from an initial ``2`` after
+    a live backfill still spent 59 of 95 minutes idle with only two waves
+    admitted — see ``docs/guides/quotas.md#wave-lookahead``.)
+
+    ``transient_base_wait_seconds``/``transient_max_wait_seconds``/
+    ``retry_jitter`` configure :class:`afly.appsflyer.retry.RetryPolicy`'s
+    backoff for ``TransientError`` (5xx/network/an un-marked 403) and, via
+    ``retry_jitter`` only, the linear ``RateLimitError`` backoff too (inline
+    *and* ``QuotaScheduler``'s deferral — see that module). The nominal
+    transient wait is ``min(transient_base_wait_seconds * 2**(attempt-1),
+    transient_max_wait_seconds)`` — 30s/60s/120s/240s at the defaults before
+    `max_retries` (5) is exhausted. ``retry_jitter`` then multiplies *every*
+    computed wait (transient or rate-limit) by ``1 + retry_jitter * U`` (``U``
+    uniform in ``[0, 1)``) — it only ever lengthens a wait, so a rate-limit
+    wait can never drop below AppsFlyer's own per-minute spacing; the point is
+    to stop every sibling key from waking up and hitting AppsFlyer again at
+    exactly the same moment.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -102,7 +143,23 @@ class QuotaConfig(BaseModel):
     reserve_long_calls: int = Field(default=0, ge=0)
     min_gap_seconds: float = Field(default=0.5, ge=0)
     max_retries: int = Field(default=5, ge=0)
+    transient_base_wait_seconds: float = Field(default=TRANSIENT_BASE_WAIT_SECONDS, ge=0)
+    transient_max_wait_seconds: float = Field(default=TRANSIENT_MAX_WAIT_SECONDS, ge=0)
+    retry_jitter: float = Field(default=RETRY_JITTER, ge=0, le=1)
     max_waves_in_flight: int = Field(default=8, ge=1)
+
+    def retry_policy_kwargs(self) -> RetryPolicyKwargs:
+        """Keyword args for building a :class:`~afly.appsflyer.retry.RetryPolicy`
+        from this project's retry/backoff tuning — the one place that mapping
+        is spelled out, so every caller that builds a ``RetryPolicy`` from a
+        loaded project (``afly run``/``afly apps``/``afly debug``) passes the
+        same three fields the same way instead of re-deriving them.
+        """
+        return {
+            "transient_base_wait": self.transient_base_wait_seconds,
+            "transient_cap": self.transient_max_wait_seconds,
+            "retry_jitter": self.retry_jitter,
+        }
 
 
 class ErrorAlertingConfig(BaseModel):

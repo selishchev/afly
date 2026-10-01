@@ -5,8 +5,10 @@ choice — without duplicating a row. This page explains the mechanism.
 
 ## The problem
 
-ClickHouse (the version afly targets, 22.11) has neither a cheap `DELETE
-FROM` nor a `ReplacingMergeTree` a plain `SELECT` can trust without `FINAL`
+ClickHouse 22.11 (the oldest version afly targets — also tested against
+26.3, see [Installation](../getting-started/installation.md)) has neither a
+cheap `DELETE FROM` nor a `ReplacingMergeTree` a plain `SELECT` can trust
+without `FINAL`
 (expensive at scale). "Re-pull a date range without duplicating what's
 already there" therefore can't be a plain append.
 
@@ -31,7 +33,9 @@ every day of a calendar month a wave fetched, not just one day), afly:
 
 1. Copies every existing row of that partition **except** the specific
    `(day, extract, app)` triples this run is authoritative for, into a
-   scratch staging table.
+   scratch staging table (`<table>__afly_staging`, (re)created once at the
+   start of the run and dropped again at the end — never visible between
+   runs; see [Tables reference](../reference/tables.md)).
 2. Inserts the freshly-pulled rows for those triples into the same staging
    table.
 3. Atomically swaps the whole partition in: `ALTER TABLE ... REPLACE

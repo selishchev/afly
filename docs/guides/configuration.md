@@ -25,6 +25,7 @@ defaults:                         # project-wide fallback for optional extract f
   currency: preferred              # AppsFlyer ignores this for these reports — see below
   on_empty: skip                  # never wipe a day because AppsFlyer returned empty
   keep_unknown_columns: false
+  exclude_apps: []                 # app ids to drop from EVERY extract — see below
 
 quota:                            # AppsFlyer Pull API budget afly enforces on itself
   account_long_calls_per_day: 120
@@ -36,6 +37,15 @@ error_alerting:
   enabled: false
   channels: [ops_mattermost]
 ```
+
+**`defaults.exclude_apps` is UNIONED into each extract, not a fallback.**
+Every other `defaults.*` field above only applies when the extract leaves its
+own field unset; `exclude_apps` is the one exception — an extract's own
+`exclude_apps:` and the project's `defaults.exclude_apps:` are combined
+(order-preserving, de-duplicated), so a project-wide exclusion (e.g. a
+decommissioned test app id) can't be silently dropped by an extract that
+also sets its own list. An explicit `afly run --apps` still can't bring back
+an app either list excludes.
 
 `defaults` fields fall through to every extract that doesn't override them —
 an extract only states what makes it different (see
@@ -137,7 +147,8 @@ afly run --select "*" --profile staging
 | `tables.loads` / `tables.locks` | Names of afly's own bookkeeping tables (`_afly_loads`/`_afly_locks` by default). |
 | `profiles.<name>.clickhouse.database` | Where destination tables (from each extract's `table:`) live by default. |
 | `profiles.<name>.clickhouse.internal_database` | Where `_afly_loads`/`_afly_locks` live — defaults to the same as `database`. |
-| `staging_database` | the destination's db | Database for transient `…__afly_staging` tables; set it when the destination db is mirrored automatically. |
+| `staging_database` | the destination's db | Database for transient `…__afly_staging` tables, (re)created at the start of each run and dropped at the end; set it when the destination db is mirrored automatically. |
+| `quota.transient_base_wait_seconds` / `transient_max_wait_seconds` / `retry_jitter` | Retry/backoff tuning for transient AppsFlyer failures and rate-limit deferrals — see [Quotas & scheduling](quotas.md#retry--backoff). |
 | `error_alerting.channels` | Names looked up in `profiles.yml`'s `alert_channels` — see [Alerting](alerting.md). |
 
 Full field list with every default: [Config reference](../reference/config.md).

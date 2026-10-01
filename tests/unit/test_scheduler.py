@@ -52,6 +52,11 @@ def _quota(**overrides: object) -> QuotaConfig:
         "reserve_long_calls": 0,
         "min_gap_seconds": 0.0,
         "max_retries": 5,
+        # Deterministic by default — a QuotaScheduler built with the real
+        # QuotaConfig default (0.25) would jitter `defer()`'s wait with
+        # `random.random()`, breaking the exact-wait assertions throughout
+        # this file. Tests that specifically exercise jitter override this.
+        "retry_jitter": 0.0,
     }
     base.update(overrides)
     return QuotaConfig(**base)  # type: ignore[arg-type]
@@ -317,6 +322,29 @@ def test_defer_escalates_linearly_then_skips_after_max_retries_and_exhausts_app(
     assert scheduler.next_job() is None
     assert len(scheduler.skipped) == 2
     assert "exhausted" in scheduler.skipped[1].reason
+
+
+@pytest.mark.unit
+def test_defer_jitter_never_drops_below_nominal_wait() -> None:
+    """``defer``'s escalating wait is jittered the same way RetryPolicy's own
+    waits are (see test_retry.py) — it must never drop below the nominal
+    ``max(delay, short_call_interval_seconds) * count`` value."""
+    for r in (0.0, 0.5, 0.999):
+        clock = FakeClock()
+        sleep = FakeSleep(clock)
+        quota = _quota(short_call_interval_seconds=60, retry_jitter=0.25)
+        job = _long_job("app1")
+        scheduler = QuotaScheduler([job], quota, clock=clock, sleep=sleep, rand=lambda r=r: r)
+        scheduler.load_wave([job])
+
+        first = scheduler.next_job()
+        assert first is job
+        assert scheduler.defer(job, 0.0) is True
+
+        second = scheduler.next_job()
+        assert second is job
+        assert sleep.calls == [pytest.approx(60.0 * (1 + 0.25 * r))]
+        assert sleep.calls[0] >= 60.0
 
 
 @pytest.mark.unit

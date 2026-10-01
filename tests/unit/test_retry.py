@@ -53,7 +53,7 @@ def test_success_on_first_try_no_sleep() -> None:
 @pytest.mark.unit
 def test_rate_limit_backoff_is_linear_in_attempt() -> None:
     sleep = _FakeSleep()
-    policy = RetryPolicy(sleep=sleep, rate_limit_base_wait=60.0, max_retries=5)
+    policy = RetryPolicy(sleep=sleep, rate_limit_base_wait=60.0, max_retries=5, retry_jitter=0.0)
     errors = [RateLimitError("hit", status=429, retry_after=None) for _ in range(3)]
     fn = _flaky(list(errors))
 
@@ -65,7 +65,7 @@ def test_rate_limit_backoff_is_linear_in_attempt() -> None:
 @pytest.mark.unit
 def test_rate_limit_honours_retry_after_over_base_wait() -> None:
     sleep = _FakeSleep()
-    policy = RetryPolicy(sleep=sleep, rate_limit_base_wait=60.0, max_retries=5)
+    policy = RetryPolicy(sleep=sleep, rate_limit_base_wait=60.0, max_retries=5, retry_jitter=0.0)
     fn = _flaky([RateLimitError("hit", status=403, retry_after=250.0)])
 
     assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
@@ -76,7 +76,7 @@ def test_rate_limit_honours_retry_after_over_base_wait() -> None:
 @pytest.mark.unit
 def test_rate_limit_retry_after_smaller_than_base_wait_uses_base() -> None:
     sleep = _FakeSleep()
-    policy = RetryPolicy(sleep=sleep, rate_limit_base_wait=60.0, max_retries=5)
+    policy = RetryPolicy(sleep=sleep, rate_limit_base_wait=60.0, max_retries=5, retry_jitter=0.0)
     fn = _flaky([RateLimitError("hit", status=429, retry_after=5.0)])
 
     assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
@@ -114,7 +114,9 @@ def test_rate_limit_exhausted_reraises_rate_limit_error() -> None:
 @pytest.mark.unit
 def test_transient_backoff_is_exponential_capped() -> None:
     sleep = _FakeSleep()
-    policy = RetryPolicy(sleep=sleep, transient_base_wait=2.0, transient_cap=10.0, max_retries=6)
+    policy = RetryPolicy(
+        sleep=sleep, transient_base_wait=2.0, transient_cap=10.0, max_retries=6, retry_jitter=0.0
+    )
     fn = _flaky([TransientError("boom", status=502) for _ in range(4)])
 
     assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
@@ -211,6 +213,7 @@ def test_defer_rate_limits_leaves_transient_backoff_inline() -> None:
         transient_cap=10.0,
         max_retries=6,
         defer_rate_limits=True,
+        retry_jitter=0.0,
     )
     fn = _flaky([TransientError("boom", status=502) for _ in range(4)])
 
@@ -228,3 +231,65 @@ def test_max_retries_zero_still_attempts_once_then_raises() -> None:
         policy.execute(fn)  # type: ignore[arg-type]
     assert policy.last_attempts == 1
     assert sleep.waits == []
+
+
+# -- configurable defaults + jitter (afly.utils.retry_defaults) -------------
+
+
+@pytest.mark.unit
+def test_transient_defaults_match_quota_config_defaults() -> None:
+    """A RetryPolicy built without a project must back off exactly like
+    QuotaConfig's own defaults — see RetryPolicy's class docstring."""
+    policy = RetryPolicy()
+    assert policy.transient_base_wait == 30.0
+    assert policy.transient_cap == 600.0
+    assert policy.retry_jitter == 0.25
+
+
+@pytest.mark.unit
+def test_transient_sequence_at_defaults_before_the_cap() -> None:
+    sleep = _FakeSleep()
+    policy = RetryPolicy(sleep=sleep, max_retries=5, retry_jitter=0.0)
+    fn = _flaky([TransientError("boom", status=502) for _ in range(4)])
+
+    assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
+    # 30 * 2**(n-1) for n in 1..4 — never reaches the 600s cap at these defaults.
+    assert sleep.waits == [30.0, 60.0, 120.0, 240.0]
+
+
+@pytest.mark.unit
+def test_transient_jitter_lengthens_but_never_shortens_the_wait() -> None:
+    sleep = _FakeSleep()
+    policy = RetryPolicy(
+        sleep=sleep, transient_base_wait=10.0, transient_cap=1000.0, max_retries=2, rand=lambda: 0.0
+    )
+    fn = _flaky([TransientError("boom", status=502)])
+    assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
+    # rand() == 0 -> the jitter multiplier is exactly 1: the lower bound.
+    assert sleep.waits == [10.0]
+
+    sleep2 = _FakeSleep()
+    policy2 = RetryPolicy(
+        sleep=sleep2,
+        transient_base_wait=10.0,
+        transient_cap=1000.0,
+        max_retries=2,
+        rand=lambda: 0.999,
+    )
+    fn2 = _flaky([TransientError("boom", status=502)])
+    assert policy2.execute(fn2) == "ok"  # type: ignore[arg-type]
+    # rand() -> 1 approaches the upper bound: nominal * (1 + retry_jitter).
+    assert sleep2.waits[0] > 10.0
+    assert sleep2.waits[0] == pytest.approx(10.0 * (1 + 0.25 * 0.999))
+
+
+@pytest.mark.unit
+def test_rate_limit_jitter_never_drops_below_nominal_wait() -> None:
+    for r in (0.0, 0.5, 0.999):
+        sleep = _FakeSleep()
+        policy = RetryPolicy(
+            sleep=sleep, rate_limit_base_wait=60.0, max_retries=2, rand=lambda r=r: r
+        )
+        fn = _flaky([RateLimitError("hit", status=429)])
+        assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
+        assert sleep.waits[0] >= 60.0

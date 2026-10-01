@@ -25,6 +25,12 @@ def _describe(extract: LoadedExtract) -> list[str]:
     if config.media_source:
         lines.append(f"media_source: {config.media_source}")
     lines.append(f"apps: {', '.join(config.apps) if config.apps else 'all account apps'}")
+    if config.exclude_apps:
+        # Already the UNION of this extract's own `exclude_apps:` and the
+        # project's `defaults.exclude_apps:` (ExtractConfig.with_defaults) —
+        # this is the one place an operator can see the merged list without
+        # reaching for `--json`.
+        lines.append(f"exclude_apps: {', '.join(config.exclude_apps)}")
     lines.append(
         f"window: start_date={config.start_date} lookback_days={config.lookback_days} "
         f"chunk_days={config.chunk_days} include_current_day={config.include_current_day}"

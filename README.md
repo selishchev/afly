@@ -126,7 +126,7 @@ guide](docs/guides/claude-code.md).
 ## Requirements
 
 - Python 3.10+
-- ClickHouse (tested against 22.11)
+- ClickHouse (tested against 22.11 and 26.3 — CI's integration suite runs the full test matrix against both)
 - An AppsFlyer account with Pull API (API V2) access
 
 ## License

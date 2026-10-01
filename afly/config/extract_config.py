@@ -110,12 +110,23 @@ class ExtractConfig(BaseModel):
         :class:`ConfigError` if ``start_date`` is still unset after the
         merge: unlike the other fields there is no safe built-in fallback
         for "which day does history start on".
+
+        ``exclude_apps`` is the one field that doesn't follow the "extract's
+        own value wins outright" pattern below — it's a list, always "set"
+        (default ``[]``, never ``None``), so there's no way to tell "the
+        extract deliberately wants zero exclusions" from "the extract didn't
+        mention it". UNION the two lists instead (order-preserving,
+        de-duplicated): a project-wide exclusion (e.g. a decommissioned app
+        id) should apply to every extract, not be silently droppable by one
+        that also sets its own `exclude_apps:`.
         """
+        merged_exclude_apps = list(dict.fromkeys([*self.exclude_apps, *defaults.exclude_apps]))
         merged = self.model_copy(
             update={
                 "start_date": (
                     self.start_date if self.start_date is not None else defaults.start_date
                 ),
+                "exclude_apps": merged_exclude_apps,
                 "lookback_days": (
                     self.lookback_days if self.lookback_days is not None else defaults.lookback_days
                 ),

@@ -8,12 +8,18 @@ own backoff loop — and so M4's quota scheduler can observe rate-limit hits
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TypeVar
 
 from afly.appsflyer.errors import AppsFlyerError, AuthError, RateLimitError, TransientError
+from afly.utils.retry_defaults import (
+    RETRY_JITTER,
+    TRANSIENT_BASE_WAIT_SECONDS,
+    TRANSIENT_MAX_WAIT_SECONDS,
+)
 
 T = TypeVar("T")
 
@@ -27,7 +33,16 @@ class RetryPolicy:
       defaults) before retrying — unless ``defer_rate_limits`` is set (see
       below).
     - ``TransientError`` waits an exponential ``transient_base_wait * 2**(n-1)``,
-      capped at ``transient_cap``.
+      capped at ``transient_cap`` — 30s/60s/120s/240s at the defaults before
+      ``max_retries`` (5) runs out.
+    - Both waits above are then **jittered**: ``actual = nominal * (1 +
+      retry_jitter * U)``, ``U`` uniform in ``[0, 1)`` via ``rand()``. This
+      only ever lengthens a wait (never shortens it, so a rate-limit wait
+      never drops below AppsFlyer's own per-minute spacing) — the point is to
+      stop every sibling key/process from waking up and hitting AppsFlyer
+      again at exactly the same instant. ``rand`` is injectable (defaults to
+      :func:`random.random`) so tests can pin it to ``0`` (minimum wait) or
+      close to ``1`` (near-maximum) instead of tolerating flakiness.
     - Every other :class:`AppsFlyerError` (``AuthError``, ``PermanentError``,
       ``EmptyBodyError``) propagates immediately — retrying a bad token or a
       404 can't ever succeed.
@@ -53,12 +68,18 @@ class RetryPolicy:
 
     max_retries: int = 5
     rate_limit_base_wait: float = 60.0
-    transient_base_wait: float = 2.0
-    transient_cap: float = 60.0
+    transient_base_wait: float = TRANSIENT_BASE_WAIT_SECONDS
+    transient_cap: float = TRANSIENT_MAX_WAIT_SECONDS
+    retry_jitter: float = RETRY_JITTER
     sleep: Callable[[float], None] = field(default=time.sleep)
+    rand: Callable[[], float] = field(default=random.random)
     on_rate_limit: Callable[[RateLimitError, int], None] | None = None
     defer_rate_limits: bool = False
     last_attempts: int = field(default=0, init=False)
+
+    def _jittered(self, nominal: float) -> float:
+        """Apply the ``retry_jitter`` spread — see the class docstring."""
+        return nominal * (1 + self.retry_jitter * self.rand())
 
     def execute(self, fn: Callable[[], T]) -> T:
         """Call *fn* until it succeeds or retries are exhausted."""
@@ -78,7 +99,9 @@ class RetryPolicy:
                     raise
                 if attempt >= self.max_retries:
                     break
-                wait = max(exc.retry_after or 0.0, self.rate_limit_base_wait) * attempt
+                wait = self._jittered(
+                    max(exc.retry_after or 0.0, self.rate_limit_base_wait) * attempt
+                )
                 self.sleep(wait)
             except TransientError as exc:
                 last_error = exc
@@ -88,8 +111,8 @@ class RetryPolicy:
                             str(exc), status=exc.status, body=exc.body_excerpt, url=exc.url
                         ) from exc
                     break
-                wait = min(self.transient_base_wait * (2 ** (attempt - 1)), self.transient_cap)
-                self.sleep(wait)
+                nominal = min(self.transient_base_wait * (2 ** (attempt - 1)), self.transient_cap)
+                self.sleep(self._jittered(nominal))
 
         assert last_error is not None  # loop always sets it before exiting via break
         raise last_error

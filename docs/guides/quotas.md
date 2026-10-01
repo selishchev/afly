@@ -84,7 +84,7 @@ epoch-aligned date window, across every extract, so a day's ClickHouse
 partition is rebuilt only once every extract's contribution to it has been
 fetched. Within one wave, a throttled key never blocks the others (the
 deferral behaviour above). Across waves, `quota.max_waves_in_flight`
-(default **2**) controls how far ahead the scheduler is allowed to look:
+(default **8**) controls how far ahead the scheduler is allowed to look:
 it may hand out jobs from that many waves at once, oldest first, so a
 handful of rate-limited keys in one wave don't leave *every other key in
 the whole run* idle just because they happen to be the last jobs left in
@@ -107,10 +107,18 @@ Two things stay true regardless of the lookahead depth:
 Set `quota.max_waves_in_flight: 1` to go back to the old strict
 one-wave-at-a-time order exactly (useful mainly for reproducing/debugging
 an ordering-sensitive issue) — it's a legitimate value, not a deprecated
-fallback. Raising it further than 2 is rarely useful: it only ever helps
-when a wave's *last* remaining keys are the ones being rate-limited, and
-each extra wave in flight linearly increases the buffered-rows memory
-footprint.
+fallback.
+
+Why the default is **8**, not a smaller number like 2: measured on a live
+18-app backfill (12 waves), admitting only 2 waves at a time still left each
+key with at most ~6 jobs queued up — once those were used up (one call per
+~65s), every key waited for the oldest wave to close behind a single
+deferred job, and 59 of the run's 95 minutes were spent idle that way. A
+deeper lookahead window keeps other keys busy while one key backs off. The
+cost is memory, not time: every admitted wave's fetched rows sit buffered
+until that wave is rebuilt, so raise or lower this mainly for unusually large
+accounts — a regular run (a handful of waves) is fully admitted either way
+regardless of the setting.
 
 ## Tuning the budget itself
 
@@ -118,3 +126,30 @@ footprint.
 it isn't read from AppsFlyer. Set it to match your account's actual limits
 if they differ from the defaults (some accounts have higher published
 limits). See [Config reference](../reference/config.md) for every field.
+
+## Retry & backoff
+
+Independent of the scheduling above, every AppsFlyer call also goes through
+a retry policy for transient failures (5xx, a network error, or a 403
+without AppsFlyer's rate-limit marker):
+
+- The nominal wait doubles each attempt — `quota.transient_base_wait_seconds`
+  (default **30**) × 2^(attempt−1) — capped at
+  `quota.transient_max_wait_seconds` (default **600**). At the defaults that's
+  30s/60s/120s/240s before `quota.max_retries` (5) gives up, so a
+  persistently failing chunk can hold the run for up to ~7.5 minutes of
+  inline sleeping (this wait blocks the run — it isn't deferred into the
+  scheduler the way a rate-limit hit is, since there's no other key's work to
+  interleave with a 5xx).
+- Every retry/deferral wait (this one, the inline rate-limit wait, and the
+  scheduler's own deferral above) is then spread by `quota.retry_jitter`
+  (default **0.25**): `actual = nominal * (1 + retry_jitter * U)`, `U`
+  uniform in `[0, 1)`. Jitter only ever *lengthens* a wait, never shortens
+  it, so it can never undercut AppsFlyer's own per-minute spacing — the
+  point is to stop several keys (or several afly processes) that all got
+  rate-limited together from retrying at the exact same instant.
+
+Lower `transient_base_wait_seconds`/`transient_max_wait_seconds` if your
+account's outages tend to be short-lived and you'd rather fail faster; raise
+them if AppsFlyer-side hiccups on your account routinely outlast a few
+minutes.

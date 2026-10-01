@@ -110,6 +110,13 @@ class AlertChannelConfig(BaseModel):
     username: str = "afly"
     icon_emoji: str | None = None
     timeout: int = Field(default=10, ge=1)
+    # A link to the orchestrator's run for this invocation (e.g. a Prefect
+    # flow-run URL), typically written with env placeholders so it resolves
+    # per-invocation — see docs/guides/alerting.md. Unlike webhook_url, an
+    # unresolved/empty value is never an error and never a warning: a laptop
+    # run genuinely has no orchestrator, so afly.alerting.webhook silently
+    # omits the link from the payload rather than nagging about it.
+    run_url: str = ""
 
 
 class ProfileConfig(BaseModel):

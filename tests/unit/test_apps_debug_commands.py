@@ -40,7 +40,14 @@ def _fake_ctx(token: str = _TOKEN, max_retries: int = 2, root: Path | None = Non
         host="ch", port=9000, user="default", password="", database="db"
     )
     profile = types.SimpleNamespace(appsflyer=appsflyer, clickhouse=clickhouse)
-    quota = types.SimpleNamespace(max_retries=max_retries)
+    quota = types.SimpleNamespace(
+        max_retries=max_retries,
+        retry_policy_kwargs=lambda: {
+            "transient_base_wait": 30.0,
+            "transient_cap": 600.0,
+            "retry_jitter": 0.0,
+        },
+    )
     project = types.SimpleNamespace(
         quota=quota,
         defaults=types.SimpleNamespace(partition_granularity="month"),
