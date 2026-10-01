@@ -347,6 +347,127 @@ def test_defer_jitter_never_drops_below_nominal_wait() -> None:
         assert sleep.calls[0] >= 60.0
 
 
+# -- transient-error deferral: QuotaScheduler.defer_transient ---------------
+
+
+@pytest.mark.unit
+def test_defer_transient_schedule_is_exponential_at_defaults() -> None:
+    """At zero jitter, defer_transient reproduces RetryPolicy's inline
+    30/60/120s exponential schedule (base 30, doubling per attempt) —
+    see transient_base_wait_seconds/transient_max_wait_seconds."""
+    clock = FakeClock()
+    sleep = FakeSleep(clock)
+    quota = _quota(
+        max_retries=5,
+        transient_base_wait_seconds=30.0,
+        transient_max_wait_seconds=600.0,
+    )
+    job = _short_job("app1")
+    scheduler = QuotaScheduler([job], quota, clock=clock, sleep=sleep)
+    scheduler.load_wave([job])
+
+    got = scheduler.next_job()
+    assert got is job
+    assert scheduler.defer_transient(job) is True  # 1st failure: 30 * 2**0
+
+    got = scheduler.next_job()
+    assert got is job
+    assert sleep.calls == [30.0]
+    assert scheduler.defer_transient(job) is True  # 2nd failure: 30 * 2**1
+
+    got = scheduler.next_job()
+    assert got is job
+    assert sleep.calls == [30.0, 60.0]
+    assert scheduler.defer_transient(job) is True  # 3rd failure: 30 * 2**2
+
+    got = scheduler.next_job()
+    assert got is job
+    assert sleep.calls == [30.0, 60.0, 120.0]
+
+
+@pytest.mark.unit
+def test_defer_transient_jitter_bound_near_one() -> None:
+    """``rand() -> ~1`` approaches the upper bound of the jitter spread —
+    the same bound RetryPolicy's own transient jitter respects."""
+    clock = FakeClock()
+    sleep = FakeSleep(clock)
+    quota = _quota(
+        max_retries=5,
+        transient_base_wait_seconds=30.0,
+        transient_max_wait_seconds=600.0,
+        retry_jitter=0.25,
+    )
+    job = _short_job("app1")
+    scheduler = QuotaScheduler([job], quota, clock=clock, sleep=sleep, rand=lambda: 0.999)
+    scheduler.load_wave([job])
+
+    got = scheduler.next_job()
+    assert got is job
+    assert scheduler.defer_transient(job) is True
+
+    got = scheduler.next_job()
+    assert got is job
+    assert sleep.calls[0] >= 30.0
+    assert sleep.calls[0] == pytest.approx(30.0 * (1 + 0.25 * 0.999))
+
+
+@pytest.mark.unit
+def test_defer_transient_gives_up_at_max_retries_without_recording_a_skip() -> None:
+    """Unlike the rate-limit `defer`, exhausting `defer_transient` does NOT
+    push a SkippedJob — a transient-exhausted job is a genuine failure, and
+    the caller (Executor) is responsible for turning the False return into a
+    terminal failed JobResult."""
+    clock = FakeClock()
+    sleep = FakeSleep(clock)
+    quota = _quota(
+        max_retries=2, transient_base_wait_seconds=30.0, transient_max_wait_seconds=600.0
+    )
+    job = _short_job("app1")
+    scheduler = QuotaScheduler([job], quota, clock=clock, sleep=sleep)
+    scheduler.load_wave([job])
+
+    got = scheduler.next_job()
+    assert got is job
+    assert scheduler.defer_transient(job) is True  # failure #1 of 2: re-queued
+
+    got = scheduler.next_job()
+    assert got is job
+    assert scheduler.defer_transient(job) is False  # failure #2 of 2: give up
+
+    assert scheduler.next_job() is None
+    assert scheduler.skipped == []  # no skip recorded — see docstring
+
+
+@pytest.mark.unit
+def test_defer_transient_ordering_matches_defer_later_sibling_waits_behind() -> None:
+    """A later-wave sibling of the same pair (same key) admitted into the
+    scheduler while an earlier chunk is cooling down from a transient
+    deferral must still dispatch after it — the same admission-order
+    invariant `defer` (rate-limit) already guarantees via `_enqueue`."""
+    clock = FakeClock()
+    sleep = FakeSleep(clock)
+    quota = _quota(transient_base_wait_seconds=10.0)
+    job1 = _short_job("app1")  # wave 0
+    job2 = _short_job("app1")  # wave 1, same key
+    scheduler = QuotaScheduler([job1, job2], quota, clock=clock, sleep=sleep)
+
+    scheduler.load_wave([job1])
+    got1 = scheduler.next_job()
+    assert got1 is job1
+    assert scheduler.defer_transient(job1) is True
+
+    scheduler.load_wave([job2])  # admitted while job1 cools down
+
+    # job2 must not dispatch before job1's deferred retry, even though job2
+    # was admitted after and nothing but the key's cooldown separates them.
+    nxt = scheduler.next_job()
+    assert nxt is job1
+    assert sleep.calls == [10.0]
+
+    nxt2 = scheduler.next_job()
+    assert nxt2 is job2
+
+
 @pytest.mark.unit
 def test_record_call_increments_total_calls_by_api_calls() -> None:
     clock = FakeClock()

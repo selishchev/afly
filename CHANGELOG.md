@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-01
+
+### Fixed
+
+- **`afly run` no longer stalls the whole run on one chunk's transient
+  backoff.** Inside `afly run`, a `TransientError` (5xx, network error, read
+  timeout, retryable 404/408/416/425) used to retry inline — `RetryPolicy`
+  sleeping through 0.2.0's exponential 30/60/120/240s schedule (jittered,
+  plus each attempt's own up-to-300s read timeout) on the executor's single
+  thread, blocking every other app/key in the run for as long as that one
+  chunk kept failing. Observed in production 2026-10-01: a run stood still
+  for 13+ minutes on a single chunk. `RetryPolicy` gains `defer_transient`
+  (set by `afly run`, alongside the existing `defer_rate_limits`): a
+  `TransientError` is now re-raised on the first hit with no inline sleep,
+  and `QuotaScheduler.defer_transient` re-queues the job on its own key with
+  the same exponential schedule — exactly like a rate-limited job already
+  did — so other keys keep running while it cools down. `afly apps`/
+  `afly debug` and app-list resolution are unaffected: they still retry
+  transient errors inline, as before. A 403 without the quota marker that
+  exhausts its deferred retries still aborts the run as an auth failure,
+  matching the existing inline parity rule.
+
 ## [0.2.0] - 2026-10-01
 
 ### Added

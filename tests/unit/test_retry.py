@@ -203,6 +203,57 @@ def test_defer_rate_limits_still_calls_on_rate_limit_once() -> None:
 
 
 @pytest.mark.unit
+def test_defer_transient_raises_immediately_on_first_hit_no_sleep() -> None:
+    """`defer_transient=True` never retries a TransientError inline — it's
+    the QuotaScheduler's job to re-queue it, not RetryPolicy's to sleep (the
+    same idea as `defer_rate_limits`, applied to transient errors — see the
+    0.2.1 fix for a single-threaded `afly run` stalling on one chunk's
+    inline backoff)."""
+    sleep = _FakeSleep()
+    policy = RetryPolicy(sleep=sleep, max_retries=5, defer_transient=True)
+    fn = _flaky([TransientError("boom", status=502)])
+
+    with pytest.raises(TransientError):
+        policy.execute(fn)  # type: ignore[arg-type]
+    assert sleep.waits == []
+    assert policy.last_attempts == 1
+
+
+@pytest.mark.unit
+def test_defer_transient_raises_bare_transient_error_not_auth_even_for_403() -> None:
+    """Unlike the inline-exhausted path, a single deferred hit never escalates
+    a bare 403 to AuthError — that escalation needs the attempt count
+    accumulated *across* re-dispatches, which only QuotaScheduler.defer_transient
+    tracks (see RetryPolicy.defer_transient's docstring)."""
+    sleep = _FakeSleep()
+    policy = RetryPolicy(sleep=sleep, max_retries=5, defer_transient=True)
+    fn = _flaky([TransientError("blocked", status=403, body="abuse protection")])
+
+    with pytest.raises(TransientError):
+        policy.execute(fn)  # type: ignore[arg-type]
+    assert sleep.waits == []
+
+
+@pytest.mark.unit
+def test_defer_transient_leaves_rate_limit_backoff_inline() -> None:
+    """Only TransientError is deferred by `defer_transient` — a rate limit
+    still backs off inline (or is itself deferred only via the separate
+    `defer_rate_limits` flag)."""
+    sleep = _FakeSleep()
+    policy = RetryPolicy(
+        sleep=sleep,
+        rate_limit_base_wait=60.0,
+        max_retries=5,
+        defer_transient=True,
+        retry_jitter=0.0,
+    )
+    fn = _flaky([RateLimitError("hit", status=429) for _ in range(3)])
+
+    assert policy.execute(fn) == "ok"  # type: ignore[arg-type]
+    assert sleep.waits == [60.0, 120.0, 180.0]
+
+
+@pytest.mark.unit
 def test_defer_rate_limits_leaves_transient_backoff_inline() -> None:
     """Only RateLimitError is deferred — a 5xx still backs off inline,
     there's no per-key scheduling benefit to deferring a transient error."""

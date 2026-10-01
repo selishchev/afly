@@ -247,16 +247,19 @@ def _run_with_manager(
             plan=plan,
             scheduler=scheduler,
             client=client,
-            # defer_rate_limits=True: a rate-limited job must not block the
-            # rest of the run (see QuotaScheduler.defer) — the executor
-            # re-queues it on its own key's delay instead of RetryPolicy
-            # sleeping inline. apps_for's own `policy` above stays default
-            # (there's no per-key scheduler for the app-list lookup).
+            # defer_rate_limits=True/defer_transient=True: neither a
+            # rate-limited nor a transiently-failing job may block the rest
+            # of the run (see QuotaScheduler.defer/defer_transient) — the
+            # executor re-queues each on its own key's delay instead of
+            # RetryPolicy sleeping inline. apps_for's own `policy` above
+            # stays default (there's no per-key scheduler for the app-list
+            # lookup).
             policy_factory=lambda: RetryPolicy(
                 max_retries=quota.max_retries,
                 sleep=deps.sleep,
                 rand=deps.rand,
                 defer_rate_limits=True,
+                defer_transient=True,
                 **quota.retry_policy_kwargs(),
             ),
             loads=loads,

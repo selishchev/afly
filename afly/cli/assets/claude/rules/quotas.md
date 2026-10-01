@@ -52,6 +52,18 @@ chunk sharing the same epoch-aligned index, across every extract; default
   the rest of the run — every further long job for that app, in this wave
   and every later one, is skipped immediately without retrying against
   AppsFlyer again.
+- A transient failure (5xx, a network error, a read timeout, or a retryable
+  404/408/416/425) **also doesn't block the run**: `QuotaScheduler.defer_transient`
+  re-queues it the same way `defer` re-queues a rate-limited job (same
+  admission-order queue, same "other keys keep going" effect), but with its
+  own per-job attempt counter and AppsFlyer's *transient* backoff schedule
+  (30s, 60s, 120s, 240s at the defaults — see "Retry/backoff" below) instead
+  of the rate-limit one. Unlike a rate-limit deferral, exhausting
+  `quota.max_retries` attempts here ends the chunk **failed**, not `skipped`
+  — a persistent 5xx is a genuine failure — except a 403 that never carried
+  the rate-limit marker, which aborts the whole run as an authentication
+  failure once exhausted (same parity rule the inline retry policy applies —
+  see "Retry/backoff").
 - `--max-calls`/`--max-minutes` stop scheduling entirely once hit; every
   remaining job (this wave and later ones) is recorded `skipped` with that
   reason. The watermark makes the next `afly run` continue exactly where this
@@ -151,14 +163,14 @@ calls a bigger chunk size needs.
 
 `RetryPolicy` (`afly/appsflyer/retry.py`) governs what happens *within one
 HTTP attempt sequence*. `afly run` builds it with `defer_rate_limits=True`
-(set in `afly/run/runner.py`), which changes how `RateLimitError` is
-handled — everything else is the same for every caller (`apps`, `debug`,
-`run` alike). Every caller that has a loaded project also passes
-`quota.transient_base_wait_seconds`/`transient_max_wait_seconds`/
-`retry_jitter` into it (`QuotaConfig.retry_policy_kwargs()`) — a `RetryPolicy`
-built with no project at all falls back to the same numbers as
-`QuotaConfig`'s own defaults (30s / 600s / 0.25), so the two can never drift
-apart:
+and `defer_transient=True` (set in `afly/run/runner.py`), which changes how
+`RateLimitError`/`TransientError` are handled — everything else is the same
+for every caller (`apps`, `debug`, `run` alike). Every caller that has a
+loaded project also passes `quota.transient_base_wait_seconds`/
+`transient_max_wait_seconds`/`retry_jitter` into it
+(`QuotaConfig.retry_policy_kwargs()`) — a `RetryPolicy` built with no project
+at all falls back to the same numbers as `QuotaConfig`'s own defaults (30s /
+600s / 0.25), so the two can never drift apart:
 
 - `RateLimitError` (403 "Limit reached for" marker, or 429):
   - **`defer_rate_limits=True`** (`afly run`'s Pull API calls only): raised
@@ -171,25 +183,43 @@ apart:
     `max(Retry-After, rate_limit_base_wait) × attempt` before retrying —
     linear backoff (60s, 120s, 180s, … at defaults), up to
     `quota.max_retries` attempts, then re-raised.
-- `TransientError` (5xx, network/timeout, or a 403 *without* the quota
-  marker): exponential backoff — `transient_base_wait_seconds × 2^(attempt-1)`
-  (default base **30s**), capped at `transient_max_wait_seconds` (default
-  **600s**) — i.e. 30s/60s/120s/240s before `max_retries` (5) gives up at the
-  defaults. **Always inline, regardless of `defer_rate_limits`** (there's no
-  per-key scheduling benefit to deferring a 5xx — the run just has to wait
-  this one out). After `max_retries` attempts, a bare 403 that never resolved
-  into a real quota response is re-raised as an **auth failure** instead —
-  retrying indefinitely can't distinguish "still throttled" from "token
-  revoked," and a fresh 403 that repeats identically at every attempt is far
-  more likely the latter.
+- `TransientError` (5xx, network/timeout, a read timeout, a retryable
+  404/408/416/425, or a 403 *without* the quota marker): exponential backoff
+  — `transient_base_wait_seconds × 2^(attempt-1)` (default base **30s**),
+  capped at `transient_max_wait_seconds` (default **600s**) — i.e.
+  30s/60s/120s/240s before `max_retries` (5) gives up at the defaults.
+  - **`defer_transient=True`** (`afly run`'s Pull API calls only): raised
+    immediately on the first hit — no inline sleep, no 403→auth escalation
+    (that decision needs the attempt count accumulated *across*
+    re-dispatches, which only the scheduler tracks). It's
+    `QuotaScheduler.defer_transient` (see above), not `RetryPolicy`, that
+    decides what happens next: re-queue with the same exponential schedule,
+    or give up after `quota.max_retries` attempts — at which point the
+    `Executor` finishes the job as a failed chunk, or as the same
+    bare-403-escalates-to-auth-abort outcome described below. This is the
+    0.2.1 fix for a single-threaded run stalling on one chunk's backoff with
+    every other app/key idle (observed in production: 13+ minutes stalled on
+    one chunk) — before it, a `TransientError` always retried inline inside
+    `afly run` too.
+  - **`defer_transient=False`** (the default — `afly apps`/`afly debug`,
+    which have no per-key scheduler to defer into): retries inline, in
+    process, between attempts — there's no per-key scheduling benefit to
+    deferring a 5xx for these callers, since there's no other key's work to
+    interleave with it. After `max_retries` attempts, a bare 403 that never
+    resolved into a real quota response is re-raised as an **auth failure**
+    instead — retrying indefinitely can't distinguish "still throttled" from
+    "token revoked," and a fresh 403 that repeats identically at every
+    attempt is far more likely the latter.
 - **Jitter**: every wait above (the inline rate-limit wait, the transient
-  backoff, and `QuotaScheduler.defer`'s own wait) is multiplied by
-  `1 + retry_jitter * U` (`U` uniform in `[0, 1)` via an injectable `rand`,
-  default `random.random`) — default `retry_jitter` is **0.25**. This only
-  ever lengthens a wait (never below the nominal value), so it can't undercut
-  AppsFlyer's per-minute spacing; it exists so several keys/processes
-  rate-limited together don't all retry at the exact same instant.
-- `AuthError` (401, or the escalated 403 above) **aborts the whole run**
-  immediately — no further chunks are attempted, `summary.aborted = "auth"`.
+  backoff — inline or deferred — and `QuotaScheduler.defer`'s own wait) is
+  multiplied by `1 + retry_jitter * U` (`U` uniform in `[0, 1)` via an
+  injectable `rand`, default `random.random`) — default `retry_jitter` is
+  **0.25**. This only ever lengthens a wait (never below the nominal value),
+  so it can't undercut AppsFlyer's per-minute spacing; it exists so several
+  keys/processes rate-limited together don't all retry at the exact same
+  instant.
+- `AuthError` (401, or the escalated 403 above — inline or deferred)
+  **aborts the whole run** immediately — no further chunks are attempted,
+  `summary.aborted = "auth"`.
 - `PermanentError` (400/404) and `EmptyBodyError` fail just that chunk, no
   retry — retrying a bad app id or a malformed date range can't ever succeed.

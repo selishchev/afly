@@ -70,12 +70,23 @@ afly run --select "*" --from 2022-01-01 --chunk-days 2 --max-calls 2000 --json
   `quota.max_retries` deferrals of the same job, it's recorded `skipped`;
   if it was a long job, that app is marked exhausted for the rest of the
   run (every further long job for it is skipped without retrying).
+- A transient AppsFlyer failure (5xx, a network error, a read timeout, or a
+  retryable 404/408/416/425) doesn't block the run either: the job is
+  **deferred** the same way a rate-limited job is — put back on its own key's
+  queue with an escalating delay (30s, 60s, 120s, 240s at the defaults) —
+  while every other app's jobs keep being scheduled in the meantime. Unlike a
+  rate-limit deferral, exhausting `quota.max_retries` attempts ends the chunk
+  **failed** (not skipped) — a persistent 5xx is a real failure, not a quota
+  condition — except a 403 that never carried AppsFlyer's rate-limit marker,
+  which aborts the whole run as an authentication failure once exhausted,
+  same as the inline retry policy used by `afly apps`/`afly debug`.
 - `--max-calls`/`--max-minutes` stop scheduling entirely once hit; every
   remaining job is `skipped`.
 
-None of the above fails the run (`afly run`'s exit code stays 0) — check
-`_afly_loads.skip_reason`, or the `--json` `quota`/`jobs[]` fields, to see
-what was deferred and simply run again later.
+None of the above fails the run (`afly run`'s exit code stays 0, except the
+transient-exhaustion case just above, which fails that chunk like any other
+failure) — check `_afly_loads.skip_reason`, or the `--json` `quota`/`jobs[]`
+fields, to see what was deferred and simply run again later.
 
 ## Wave lookahead
 
@@ -129,25 +140,28 @@ limits). See [Config reference](../reference/config.md) for every field.
 
 ## Retry & backoff
 
-Independent of the scheduling above, every AppsFlyer call also goes through
-a retry policy for transient failures (5xx, a network error, or a 403
-without AppsFlyer's rate-limit marker):
+Every AppsFlyer call goes through a retry policy for transient failures (5xx,
+a network error, a read timeout, or a 403 without AppsFlyer's rate-limit
+marker). How that backoff is spent depends on the caller:
 
-- The nominal wait doubles each attempt — `quota.transient_base_wait_seconds`
-  (default **30**) × 2^(attempt−1) — capped at
-  `quota.transient_max_wait_seconds` (default **600**). At the defaults that's
-  30s/60s/120s/240s before `quota.max_retries` (5) gives up, so a
-  persistently failing chunk can hold the run for up to ~7.5 minutes of
-  inline sleeping (this wait blocks the run — it isn't deferred into the
-  scheduler the way a rate-limit hit is, since there's no other key's work to
-  interleave with a 5xx).
-- Every retry/deferral wait (this one, the inline rate-limit wait, and the
-  scheduler's own deferral above) is then spread by `quota.retry_jitter`
-  (default **0.25**): `actual = nominal * (1 + retry_jitter * U)`, `U`
-  uniform in `[0, 1)`. Jitter only ever *lengthens* a wait, never shortens
-  it, so it can never undercut AppsFlyer's own per-minute spacing — the
-  point is to stop several keys (or several afly processes) that all got
-  rate-limited together from retrying at the exact same instant.
+- **Inside `afly run`**: a transient failure is deferred through the
+  scheduler exactly like a rate-limit hit — see "What happens when a limit is
+  hit" above — so it never blocks other apps/keys while it backs off.
+- **`afly apps`/`afly debug`, and app-list resolution**: there's no per-key
+  scheduler to defer into, so the retry policy sleeps inline, in process,
+  between attempts.
+
+Either way, the nominal wait doubles each attempt —
+`quota.transient_base_wait_seconds` (default **30**) × 2^(attempt−1) —
+capped at `quota.transient_max_wait_seconds` (default **600**). At the
+defaults that's 30s/60s/120s/240s before `quota.max_retries` (5) gives up.
+Every retry/deferral wait (this one, the inline rate-limit wait, and the
+scheduler's own deferral above) is then spread by `quota.retry_jitter`
+(default **0.25**): `actual = nominal * (1 + retry_jitter * U)`, `U` uniform
+in `[0, 1)`. Jitter only ever *lengthens* a wait, never shortens it, so it can
+never undercut AppsFlyer's own per-minute spacing — the point is to stop
+several keys (or several afly processes) that all got rate-limited together
+from retrying at the exact same instant.
 
 Lower `transient_base_wait_seconds`/`transient_max_wait_seconds` if your
 account's outages tend to be short-lived and you'd rather fail faster; raise
